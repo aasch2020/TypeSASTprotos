@@ -1,0 +1,11 @@
+// Ordered list of Accessors
+
+0, user, admin
+
+writeAdminDB: admin
+setFlags: user, admin
+
+
+
+//Elevator
+auth: 0, user
