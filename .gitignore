@@ -1,0 +1,45 @@
+# Node modules
+node_modules/
+**/node_modules/
+
+# TypeScript output
+out/
+dist/
+build/
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# VSCode settings
+.vscode/
+!.vscode/settings.json   # if you want to keep workspace settings
+
+# Compiled JS from TS (if you keep .ts files and don't commit JS)
+**/*.js
+**/*.js.map
+**/*.d.ts
+
+# Package lock (optional, usually committed for deterministic installs)
+# package-lock.json
+
+# Security / secret files
+*.key
+*.pem
+*.p12
+
+# Misc
+*.tmp
+*.bak
+*.swp
+
+# Ignore your local SemBase YAML if it's not meant to be tracked
+SemBase.yaml

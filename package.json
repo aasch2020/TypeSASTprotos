@@ -1,0 +1,36 @@
+{
+  "devDependencies": {
+    "ts-morph": "^27.0.2"
+  },
+  "name": "protos",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "dependencies": {
+    "balanced-match": "^4.0.2",
+    "brace-expansion": "^5.0.2",
+    "code-block-writer": "^13.0.3",
+    "fdir": "^6.5.0",
+    "fs": "^0.0.1-security",
+    "jackspeak": "^4.2.3",
+    "minimatch": "^10.2.0",
+    "path-browserify": "^1.0.1",
+    "picomatch": "^4.0.3",
+    "tinyglobby": "^0.2.15"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aasch2020/TypeSASTprotos.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/aasch2020/TypeSASTprotos/issues"
+  },
+  "homepage": "https://github.com/aasch2020/TypeSASTprotos#readme"
+}

@@ -17,25 +17,25 @@ type Token = {
 
 class UserAccount {
   /** @requiresRole user */
-  updateEmail(email: string): void {
+  updateEmail(email: string, roleContext: user): void {
   }
   /** @requiresRole admin */
-  promoteToAdmin(): void {
+  promoteToAdmin(roleContext: admin): void {
   }
 }
 
 
-function verifyToken(token: string): Token {
+function verifyToken(token: string, roleContext: uath = new uath): Token {
   return { userId: 1, role: "user" };
 }
 
 /** @requiresRole admin */
-function writeAdminDB(): void { }
+function writeAdminDB(roleContext: admin): void { }
 
 
 
 /** @requiresRole uath @becomesRole user */
-function auth(req: string): boolean {
+function auth(req: string, roleContext: uath): boolean {
   const header = req;
   if (!header) return false;
 
@@ -44,7 +44,7 @@ function auth(req: string): boolean {
 }
 
 /** @requiresRole user @becomesRole admin */
-function requireAdminRole(role: Role): boolean {
+function requireAdminRole(role: Role, roleContext: user): boolean {
   if (role === "admin") {
     return true;
 
@@ -55,11 +55,11 @@ function requireAdminRole(role: Role): boolean {
 
 
 
-function adminWrite(req: string, ctx: Role): void {
-  if (!requireAdminRole(ctx)) {
+function adminWrite(req: string, ctx: Role, roleContext: uath = new uath): void {
+  if (!requireAdminRole(ctx, roleContext)) {
     throw new Error("Unauthorized");
   } else {
-    writeAdminDB();
+    writeAdminDB(roleContext);
   }
 }
 interface UserRequestBody {
@@ -70,18 +70,18 @@ interface UserRequestBody {
 }
 
 
-function updateUser(req: UserRequestBody): void {
+function updateUser(req: UserRequestBody, roleContext: uath = new uath): void {
   let account: UserAccount | undefined;
-  if (auth(req.token)) {
+  if (auth(req.token, roleContext)) {
     account = new UserAccount();
   } else {
 
     if (account && req.email) {
-      account.updateEmail(req.email);
+      account.updateEmail(req.email, roleContext);
     }
 
     if (account && req.admin === true) {
-      account.promoteToAdmin();
+      account.promoteToAdmin(roleContext);
     }
   }
 }
@@ -114,58 +114,58 @@ class ConfigureableObject {
 
 
   /** @requiresRole user */
-  getPublicName(): string {
+  getPublicName(roleContext: user): string {
     return this.publicName;
   }
 
   /** @requiresRole user */
-  getImageUrl(): string {
+  getImageUrl(roleContext: user): string {
     return this.imageUrl;
   }
 
   /** @requiresRole user */
-  getValue(): number {
+  getValue(roleContext: user): number {
     return this.value;
   }
 
 
 
   /** @requiresRole user */
-  setPublicName(name: string): void {
+  setPublicName(name: string, roleContext: user): void {
     this.publicName = name;
   }
 
   /** @requiresRole user */
-  setImageUrl(url: string): void {
+  setImageUrl(url: string, roleContext: user): void {
     this.imageUrl = url;
   }
 
   /** @requiresRole user */
-  setValue(value: number): void {
+  setValue(value: number, roleContext: user): void {
     this.value = value;
   }
 
 
   /** @requiresRole admin */
-  getInternalToken(): string {
+  getInternalToken(roleContext: admin): string {
     return this.internalToken;
   }
   /** @requiresRole admin */
-  getFeatureFlags(): string[] {
+  getFeatureFlags(roleContext: admin): string[] {
     return [...this.featureFlags];
   }
 
 
   /** @requiresRole admin */
-  setInternalToken(token: string): void {
+  setInternalToken(token: string, roleContext: admin): void {
     this.internalToken = token;
   }
   /** @requiresRole admin */
-  addFeatureFlag(flag: string): void {
+  addFeatureFlag(flag: string, roleContext: admin): void {
     this.featureFlags.push(flag);
   }
   /** @requiresRole admin */
-  removeFeatureFlag(flag: string): void {
+  removeFeatureFlag(flag: string, roleContext: admin): void {
     this.featureFlags =
       this.featureFlags.filter(f => f !== flag);
   }
@@ -173,7 +173,7 @@ class ConfigureableObject {
 
 
   /** @requiresRole user */
-  set(): void { }
+  set(roleContext: user): void { }
 
 }
 
@@ -181,7 +181,7 @@ class ConfigureableObject {
 
 
 // Flag any type as unauthenticated. Auto fail here, regardless of auth. 
-function applyUpdates(target: any, updates: Record<string, unknown>) {
+function applyUpdates(target: any, updates: Record<string, unknown>, roleContext: uath = new uath) {
   for (const [key, value] of Object.entries(updates)) {
     const setter = `set${key[0].toUpperCase()}${key.slice(1)}`;
 
@@ -193,8 +193,8 @@ function applyUpdates(target: any, updates: Record<string, unknown>) {
 
 
 /* -------- 0 > User -------- */
-function patch(req: UserRequestBody, res: string): string {
-  if (auth(req.token)) {
+function patch(req: UserRequestBody, res: string, roleContext: uath = new uath): string {
+  if (auth(req.token, roleContext)) {
     return "unauthenticated";
   }
 
