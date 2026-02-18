@@ -25,7 +25,7 @@ class UserAccount {
 }
 
 
-function verifyToken(token: string, roleContext: uath = new uath): Token {
+function verifyToken(token: string, roleContext: unauth = new unauth): Token {
   return { userId: 1, role: "user" };
 }
 
@@ -34,8 +34,8 @@ function writeAdminDB(roleContext: admin): void { }
 
 
 
-/** @requiresRole uath @becomesRole user */
-function auth(req: string, roleContext: uath): boolean {
+/** @requiresRole unauth @becomesRole user */
+function auth(req: string, roleContext: unauth): boolean {
   const header = req;
   if (!header) return false;
 
@@ -55,7 +55,7 @@ function requireAdminRole(role: Role, roleContext: user): boolean {
 
 
 
-function adminWrite(req: string, ctx: Role, roleContext: uath = new uath): void {
+function adminWrite(req: string, ctx: Role, roleContext: unauth = new unauth): void {
   if (!requireAdminRole(ctx, roleContext)) {
     throw new Error("Unauthorized");
   } else {
@@ -70,7 +70,7 @@ interface UserRequestBody {
 }
 
 
-function updateUser(req: UserRequestBody, roleContext: uath = new uath): void {
+function updateUser(req: UserRequestBody, roleContext: unauth = new unauth): void {
   let account: UserAccount | undefined;
   if (auth(req.token, roleContext)) {
     account = new UserAccount();
@@ -181,7 +181,7 @@ class ConfigureableObject {
 
 
 // Flag any type as unauthenticated. Auto fail here, regardless of auth. 
-function applyUpdates(target: any, updates: Record<string, unknown>, roleContext: uath = new uath) {
+function applyUpdates(target: any, updates: Record<string, unknown>, roleContext: unauth = new unauth) {
   for (const [key, value] of Object.entries(updates)) {
     const setter = `set${key[0].toUpperCase()}${key.slice(1)}`;
 
@@ -193,7 +193,7 @@ function applyUpdates(target: any, updates: Record<string, unknown>, roleContext
 
 
 /* -------- 0 > User -------- */
-function patch(req: UserRequestBody, res: string, roleContext: uath = new uath): string {
+function patch(req: UserRequestBody, res: string, roleContext: unauth = new unauth): string {
   if (auth(req.token, roleContext)) {
     return "unauthenticated";
   }
