@@ -81,7 +81,9 @@ function updateUser(req: UserRequestBody, roleContext: unauth = new unauth): voi
     }
 
     if (account && req.admin === true) {
-      account.promoteToAdmin(roleContext);
+        const roleContextRaised: admin = new admin();
+      /**@raised admin */
+      account.promoteToAdmin(roleContextRaised);
     }
   }
 }

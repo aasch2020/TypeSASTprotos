@@ -67,37 +67,6 @@ for (let i = 0; i < classNames.length; i++) {
         returnType: "void"
     });
 }
-// console.log(project.getSourceFiles().map(p => p.getBaseName()))
-
-// Loop through all source files and output only JSDoc lines
-for (const sourceFile of project.getSourceFiles()) {
-    const filePath = sourceFile.getFilePath();
-    const fullText = sourceFile.getFullText();
-    const lines = fullText.split(/\r?\n/);
-    let inJsDoc = false;
-    const jsDocLines: string[] = [];
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith("/**")) {
-            inJsDoc = true;
-            jsDocLines.push(line);
-            if (trimmed.includes("*/")) {
-                inJsDoc = false;
-            }
-        } else if (inJsDoc) {
-            jsDocLines.push(line);
-            if (trimmed.endsWith("*/") || trimmed === "*/") {
-                inJsDoc = false;
-            }
-        }
-    }
-    if (jsDocLines.length > 0) {
-        console.log(`\n--- JSDoc lines from ${path.basename(filePath)} ---`);
-        for (const ln of jsDocLines) {
-            console.log(ln);
-        }
-    }
-}
 
 // Helper: find all JSDoc with @raised (any JSDocable node)
 function findJsDocWithRaised(project: Project) {

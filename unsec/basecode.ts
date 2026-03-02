@@ -81,6 +81,7 @@ function updateUser(req: UserRequestBody): void {
     }
 
     if (account && req.admin === true) {
+      /**@raised admin */
       account.promoteToAdmin();
     }
   }
