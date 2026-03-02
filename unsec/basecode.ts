@@ -34,7 +34,7 @@ function writeAdminDB(): void { }
 
 
 
-/** @requiresRole uath @becomesRole user */
+/** @requiresRole unauth @becomesRole user */
 function auth(req: string): boolean {
   const header = req;
   if (!header) return false;

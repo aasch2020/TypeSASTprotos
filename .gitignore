@@ -40,6 +40,3 @@ Thumbs.db
 *.tmp
 *.bak
 *.swp
-
-# Ignore your local SemBase YAML if it's not meant to be tracked
-SemBase.yaml

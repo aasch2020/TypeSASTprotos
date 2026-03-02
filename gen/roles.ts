@@ -1,20 +1,20 @@
 /**
- * @roles uath < user < admin
+ * @roles unauth < user < admin
  */
-function roles(roleContext: uath = new uath) {}
+function roles(roleContext: unauth = new unauth) {}
 
-class uath {
-    cuath(roleContext: uath = new uath): void {
+class unauth {
+    cunauth(roleContext: unauth = new unauth): void {
     }
 }
 
-class user extends uath {
-    cuser(roleContext: uath = new uath): void {
+class user extends unauth {
+    cuser(roleContext: unauth = new unauth): void {
     }
 }
 
 class admin extends user {
-    cadmin(roleContext: uath = new uath): void {
+    cadmin(roleContext: unauth = new unauth): void {
     }
 }
  
