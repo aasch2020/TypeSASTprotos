@@ -1,4 +1,4 @@
-import { CallExpression, FunctionDeclaration, MethodDeclaration, Project, ScriptTarget, SyntaxKind } from "ts-morph";
+import { CallExpression, ConstructorDeclaration, FunctionDeclaration, MethodDeclaration, Project, ScriptTarget, SyntaxKind } from "ts-morph";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -49,7 +49,7 @@ const rolesLine = rolesTag.getCommentText(); // "0 < user < admin"
 
 const classNames = rolesLine!.split("<").map(s => s.trim());
 
-console.log(classNames);
+// console.log(classNames);
 
 
 for (let i = 0; i < classNames.length; i++) {
@@ -67,54 +67,63 @@ for (let i = 0; i < classNames.length; i++) {
         returnType: "void"
     });
 }
-console.log(project.getSourceFiles().map(p => p.getBaseName()))
-// 2. Get all descendant call expressions
+// console.log(project.getSourceFiles().map(p => p.getBaseName()))
 
+// Loop through all source files and output only JSDoc lines
+for (const sourceFile of project.getSourceFiles()) {
+    const filePath = sourceFile.getFilePath();
+    const fullText = sourceFile.getFullText();
+    const lines = fullText.split(/\r?\n/);
+    let inJsDoc = false;
+    const jsDocLines: string[] = [];
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("/**")) {
+            inJsDoc = true;
+            jsDocLines.push(line);
+            if (trimmed.includes("*/")) {
+                inJsDoc = false;
+            }
+        } else if (inJsDoc) {
+            jsDocLines.push(line);
+            if (trimmed.endsWith("*/") || trimmed === "*/") {
+                inJsDoc = false;
+            }
+        }
+    }
+    if (jsDocLines.length > 0) {
+        console.log(`\n--- JSDoc lines from ${path.basename(filePath)} ---`);
+        for (const ln of jsDocLines) {
+            console.log(ln);
+        }
+    }
+}
 
-// for (const sourceFile of project.getSourceFiles()) {
-//  sourceFile.forEachDescendant((node) => {
-//         // console.log("start")
-
-//         if (
-//             node.getKind() === SyntaxKind.FunctionDeclaration ||
-//             node.getKind() === SyntaxKind.MethodDeclaration
-//         ) {
-//             const fn = node.asKindOrThrow(
-//             node.getKind() === SyntaxKind.FunctionDeclaration
-//                 ? SyntaxKind.FunctionDeclaration
-//                 : SyntaxKind.MethodDeclaration
-//         );
-
-//         // 4. Find all references (call sites)
-//         const refs = fn.findReferences();
-//         console.log("refs" + fn.findReferences().length)
-//         for (const ref of refs) {
-//         for (const refEntry of ref.getReferences()) {
-//             const refd = refEntry.getNode();
-//             console.log(refd.getType().getText(), refd.getFullText(), "\n", refd)
-//             // Check if this is a call expression
-//             const callExpr = node.getParentIfKind(SyntaxKind.CallExpression);
-//             if (callExpr) {
-//             console.log("Call site found at:", callExpr.getSourceFile().getFilePath(), "line:", callExpr.getStartLineNumber());
-//             console.log("Call code:", callExpr.getText());
-//             }
-//         }
-//         }
-//     }
-
-//     });
-
-
-
-// }
+// Helper: find all JSDoc with @raised (any JSDocable node)
+function findJsDocWithRaised(project: Project) {
+    type RaisedEntry = { node: import("ts-morph").Node; roleName: string };
+    const out: RaisedEntry[] = [];
+    for (const sf of project.getSourceFiles()) {
+        sf.forEachDescendant((node) => {
+            const getJsDocs = (node as { getJsDocs?: () => { getTags: () => { getTagName: () => string; getComment: () => unknown; getCommentText: () => string } }[] }).getJsDocs;
+            if (typeof getJsDocs !== "function") return;
+            const docs = getJsDocs.call(node);
+            if (!docs?.length) return;
+            const raisedTag = docs.flatMap(d => d.getTags()).find(t => t.getTagName() === "raised");
+            if (!raisedTag) return;
+            const raw = raisedTag.getComment();
+            const roleName = (typeof raw === "string" ? raw : raisedTag.getCommentText() ?? "").trim();
+            if (roleName) out.push({ node, roleName });
+        });
+    }
+    return out;
+}
 
 let authlist: (FunctionDeclaration | MethodDeclaration)[] = []
 for (const sourceFile of project.getSourceFiles()) {
 
     // Find all function declarations
     sourceFile.forEachDescendant((node) => {
-        // console.log("start")
-
         if (
             node.getKind() === SyntaxKind.FunctionDeclaration ||
             node.getKind() === SyntaxKind.MethodDeclaration
@@ -146,16 +155,15 @@ for (const sourceFile of project.getSourceFiles()) {
                 return;
             } // nothing to add if no @requiresRole
 
-            const roleType = requiresRoleTag.getComment()?.trim() ?? classNames[0];
+            const reqRaw = requiresRoleTag.getComment();
+            const roleType = (typeof reqRaw === "string" ? reqRaw.trim() : requiresRoleTag.getCommentText()?.trim()) ?? classNames[0];
             const references = fn.findReferencesAsNodes();
             for (const reference of references) {
                 // The reference will be the identifier node used in the call
                 const callExpression = reference.getFirstAncestorByKind(SyntaxKind.CallExpression);
 
                 if (callExpression) {
-                    console.log(`Found call in file: ${callExpression.getSourceFile().getFilePath()} at line ${callExpression.getStartLineNumber()} with full text ${callExpression.getFullText()}`);
-                    // You can then perform operations on the callExpression node
-                    callExpression.addArgument("roleContext")
+                    callExpression.addArgument("roleContext");
                 }
             }
 
@@ -173,4 +181,33 @@ for (const sourceFile of project.getSourceFiles()) {
     sourceFile.save();
     console.log(`Saved annotated file: ${newPath}`);
 }
+
+// Apply @raised: find JSDoc with @raised (after tree has roleContext), insert variable and use it in the call
+const jsDocWithRaised = findJsDocWithRaised(project);
+console.log("\n--- JSDoc with @raised (ts-morph) ---");
+for (const { node, roleName } of jsDocWithRaised) {
+    const sf = node.getSourceFile();
+    const line = node.getStartLineNumber();
+    console.log(`${path.basename(sf.getFilePath())}:${line} ${node.getKindName()} @raised ${roleName}`);
+}
+// Process in reverse source order so insertions don't invalidate earlier nodes
+const sorted = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
+for (const { node, roleName } of sorted) {
+    if (node.getKind() !== SyntaxKind.ExpressionStatement) continue;
+    const parent = node.getParent();
+    if (!parent || parent.getKind() !== SyntaxKind.Block) continue;
+    const block = parent as import("ts-morph").Block;
+    const statements = block.getStatements();
+    const idx = statements.findIndex(s => s.getStart() === node.getStart());
+    if (idx < 0) continue;
+    const varName = "roleContextRaised";
+    block.insertStatements(idx, `const ${varName}: ${roleName} = new ${roleName}();`);
+    const call = node.getFirstDescendantByKind(SyntaxKind.CallExpression);
+    if (call) {
+        const args = call.getArguments();
+        if (args.length > 0) args[0].replaceWithText(varName);
+    }
+}
+project.save();
+console.log("\nDone (saved with @raised applied).");
 
