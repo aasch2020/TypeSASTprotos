@@ -20,12 +20,9 @@ Thumbs.db
 .env.*.local
 
 # VSCode settings
-.vscode/
 !.vscode/settings.json   # if you want to keep workspace settings
 
 # Compiled JS from TS (if you keep .ts files and don't commit JS)
-**/*.js
-**/*.js.map
 **/*.d.ts
 
 # Package lock (optional, usually committed for deterministic installs)
