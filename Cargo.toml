@@ -1,0 +1,7 @@
+[package]
+name = "protos"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+oxc = { version = "0.116", features = ["semantic", "cfg"] }

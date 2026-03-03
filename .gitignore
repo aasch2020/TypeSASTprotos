@@ -2,6 +2,12 @@
 node_modules/
 **/node_modules/
 
+# Rust build output
+target/
+
+# Generated TS (unsec → gen from index.ts / projc.ts)
+gen/
+
 # TypeScript output
 out/
 dist/
