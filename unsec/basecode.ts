@@ -52,9 +52,6 @@ function requireAdminRole(role: Role): boolean {
     return false;
   }
 }
-
-
-
 function adminWrite(req: string, ctx: Role): void {
   if (!requireAdminRole(ctx)) {
     throw new Error("Unauthorized");
