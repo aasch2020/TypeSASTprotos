@@ -10,10 +10,10 @@
 			"type": "extensionHost",
 			"request": "launch",
 			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}/typesast"
+				"--extensionDevelopmentPath=${workspaceFolder}/extension"
 			],
 			"outFiles": [
-				"${workspaceFolder}/typesast/dist/**/*.js"
+				"${workspaceFolder}/extension/dist/**/*.js"
 			]
 		}
 	]
