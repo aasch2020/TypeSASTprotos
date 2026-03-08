@@ -40,7 +40,7 @@ function collectRaisesToFunctions(project: Project): RaisesToFn[] {
 
 /**
  * Walks up the AST from `node` to find the nearest ancestor that is a direct
- * child of a Block — i.e. the "container statement" for this reference.
+ * child of a Block ("container statement" for this reference)
  */
 function findContainerStatement(node: Node): { stmt: Node; block: Block } | undefined {
     let current: Node | undefined = node.getParent();
