@@ -34,7 +34,7 @@ function writeAdminDB(): void { }
 
 
 
-/** @requiresRole unauth @becomesRole user */
+/** @requiresRole unauth @raisesTo user */
 function auth(req: string): boolean {
   const header = req;
   if (!header) return false;
@@ -43,7 +43,7 @@ function auth(req: string): boolean {
   return true;
 }
 
-/** @requiresRole user @becomesRole admin */
+/** @requiresRole user @raisesTo admin */
 function requireAdminRole(role: Role): boolean {
   if (role === "admin") {
     return true;
@@ -78,7 +78,7 @@ function updateUser(req: UserRequestBody): void {
     }
 
     if (account && req.admin === true) {
-      /**@raised admin */
+      requireAdminRole("admin");
       account.promoteToAdmin();
     }
   }
