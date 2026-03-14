@@ -254,9 +254,14 @@ function makeForSymex(targetDir: string) {
 
 }
 (async () => {
-    const sourceDir = "examples/unsec";
-    const targetDir = "examples/gen";
-    const jsverSymdir = "examples/gen3"
+    const args = process.argv.slice(2);
+
+    if (args.length < 3) {
+        console.error("Usage: ts-node index.ts <sourceDir> <targetDir> <jsverSymdir>");
+        process.exit(1);
+    }
+
+    const [sourceDir, targetDir, jsverSymdir] = args;
     await cp(sourceDir, jsverSymdir, { recursive: true });
     console.log(`Copied ${sourceDir} to ${jsverSymdir}`);
     makeForSymex(jsverSymdir)
