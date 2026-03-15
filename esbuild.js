@@ -1,4 +1,4 @@
-const esbuild = require("esbuild");
+import * as esbuild from "esbuild";
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -42,11 +42,31 @@ async function main() {
 			esbuildProblemMatcherPlugin,
 		],
 	});
+
+	const ctx2 = await esbuild.context({
+		entryPoints: [
+			'src/cli.ts'
+		],
+		bundle: true,
+		format: "cjs",
+		minify: production,
+		sourcemap: !production,
+		sourcesContent: false,
+		platform: 'node',
+		outfile: 'dist/cli.cjs',
+		logLevel: 'silent',
+		plugins: [
+			/* add to the end of plugins array */
+			esbuildProblemMatcherPlugin,
+		],
+	});
 	if (watch) {
-		await ctx.watch();
+		await Promise.all(ctx.watch(), ctx2.watch());
 	} else {
 		await ctx.rebuild();
 		await ctx.dispose();
+		await ctx2.rebuild();
+		await ctx2.dispose();
 	}
 }
 

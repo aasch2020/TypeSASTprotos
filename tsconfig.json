@@ -1,0 +1,12 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": [
+			"ES2022"
+		],
+		"sourceMap": false,
+		"strict": true,
+		"module": "nodenext",
+	},
+	"include": ["src/cli.ts"]
+}
