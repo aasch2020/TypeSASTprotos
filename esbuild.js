@@ -1,8 +1,5 @@
 import * as esbuild from "esbuild";
 
-const production = process.argv.includes('--production');
-const watch = process.argv.includes('--watch');
-
 /**
  * @type {import('esbuild').Plugin}
  */
@@ -30,15 +27,13 @@ async function main() {
 		],
 		bundle: true,
 		format: 'cjs',
-		minify: production,
-		sourcemap: !production,
 		sourcesContent: false,
 		platform: 'node',
-		outfile: 'dist/extension.js',
+		sourcemap: true,
+		outfile: 'dist/extension.cjs',
 		external: ['vscode'],
 		logLevel: 'silent',
 		plugins: [
-			/* add to the end of plugins array */
 			esbuildProblemMatcherPlugin,
 		],
 	});
@@ -49,25 +44,17 @@ async function main() {
 		],
 		bundle: true,
 		format: "cjs",
-		minify: production,
-		sourcemap: !production,
 		sourcesContent: false,
 		platform: 'node',
 		outfile: 'dist/cli.cjs',
 		logLevel: 'silent',
 		plugins: [
-			/* add to the end of plugins array */
-			esbuildProblemMatcherPlugin,
+			esbuildProblemMatcherPlugin
 		],
 	});
-	if (watch) {
-		await Promise.all(ctx.watch(), ctx2.watch());
-	} else {
-		await ctx.rebuild();
-		await ctx.dispose();
-		await ctx2.rebuild();
-		await ctx2.dispose();
-	}
+
+	await ctx.rebuild();
+	await ctx2.rebuild();
 }
 
 main().catch(e => {

@@ -1,80 +1,52 @@
-import * as vscode from 'vscode';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as os from 'os';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import { transformProject } from './transformer.js';
-import { mapTscErrors } from './errorMapper.js';
+import { ExtensionContext, Diagnostic, Range, DiagnosticSeverity, Uri, commands, workspace, window, languages } from "vscode";
+import * as ts from "typescript";
+import { mkdtemp, cp } from "fs/promises";
+import { join, relative } from "path";
+import { tmpdir } from "os";
 
-const execAsync = promisify(exec);
+export function activate(ctx: ExtensionContext) {
+	let col = languages.createDiagnosticCollection("ts-check");
+	ctx.subscriptions.push(col, commands.registerCommand("typesast.check", async () => {
+		if (!workspace.workspaceFolders) {
+			window.showErrorMessage("No workspace folder bozo");
+			return;
+		}
+		for (const folder of workspace.workspaceFolders) {
+			const staging = await mkdtemp(join(tmpdir(), 'typesast-'));
+			col.clear();
 
-export function activate(context: vscode.ExtensionContext) {
-    const typecheck = vscode.commands.registerCommand('typesast.typecheck', async () => {
-        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!workspaceRoot) {
-            vscode.window.showErrorMessage('No workspace folder open');
-            return;
-        }
+			await cp(folder.uri.fsPath, staging, { recursive: true });
 
-        // Create temporary directories
-        const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'typesast-'));
-        const sourceCopyDir = path.join(tmpDir, 'src');
-        const outDir = path.join(tmpDir, 'out');
-        await fs.mkdir(sourceCopyDir, { recursive: true });
-        await fs.mkdir(outDir, { recursive: true });
+			// Do the transmutation of the code
 
-        // Copy all TypeScript files from workspace to sourceCopyDir
-        const tsFiles = await vscode.workspace.findFiles('**/*.ts', '**/node_modules/**');
-        for (const file of tsFiles) {
-            const relative = path.relative(workspaceRoot, file.fsPath);
-            const target = path.join(sourceCopyDir, relative);
-            await fs.mkdir(path.dirname(target), { recursive: true });
-            await fs.copyFile(file.fsPath, target);
-        }
 
-        // Transform the copied files, writing annotated files + maps to outDir
-        await transformProject(sourceCopyDir, outDir);
+			const config = ts.getParsedCommandLineOfConfigFile(join(staging, "tsconfig.json"), {}, {
+				...ts.sys, onUnRecoverableConfigFileDiagnostic(diag) {
+					console.error('Unrecoverable tsconfig diagnostic:', ts.flattenDiagnosticMessageText(diag.messageText, '\n'));
+				}
+			});
 
-        // Run tsc on the transformed files
-        const diagnosticCollection = vscode.languages.createDiagnosticCollection('typesast');
-        diagnosticCollection.clear();
+			const program = ts.createProgram(config?.fileNames!, config?.options!);
+			const diags = ts.getPreEmitDiagnostics(program);
 
-        try {
-            await execAsync('npx tsc --noEmit', { cwd: outDir });
-            vscode.window.showInformationMessage('No type errors found.');
-        } catch (error: any) {
-            if (error.stderr) {
-                const mappedErrors = await mapTscErrors(error.stderr, sourceCopyDir, outDir);
-                // Group errors by original workspace file
-                const diagMap = new Map<string, vscode.Diagnostic[]>();
-                for (const err of mappedErrors) {
-                    const workspacePath = path.join(workspaceRoot, err.originalFile);
-                    const uri = vscode.Uri.file(workspacePath);
-                    const range = new vscode.Range(
-                        err.line - 1, err.column - 1,
-                        err.line - 1, err.column - 1
-                    );
-                    const diag = new vscode.Diagnostic(range, err.message, vscode.DiagnosticSeverity.Error);
-                    if (!diagMap.has(uri.toString())) {
-                        diagMap.set(uri.toString(), []);
-                    }
-                    diagMap.get(uri.toString())!.push(diag);
-                }
-                // Set diagnostics for each file
-                for (const [uriStr, diags] of diagMap) {
-                    diagnosticCollection.set(vscode.Uri.parse(uriStr), diags);
-                }
-            } else {
-                vscode.window.showErrorMessage(`Type check failed: ${error.message}`);
-            }
-        } finally {
-            // Clean up temp directory (optional)
-            // await fs.rm(tmpDir, { recursive: true, force: true });
-        }
-    });
+			const diagnostics = new Map<string, Diagnostic[]>();
+			for (const { start, file, length, messageText, category } of diags) {
+				if (!file || start === undefined) continue;
+				const startPos = file.getLineAndCharacterOfPosition(start);
+				const endPos = file.getLineAndCharacterOfPosition(start + (length ?? 0));
+				const range = new Range(startPos.line, startPos.character, endPos.line, endPos.character);
+				const msg = ts.flattenDiagnosticMessageText(messageText, "\n");
+				const sev = category === ts.DiagnosticCategory.Error ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning;
 
-    context.subscriptions.push(typecheck);
+				diagnostics.set(file.fileName, [
+					...(diagnostics.get(file.fileName) ?? []),
+					new Diagnostic(range, msg, sev)
+				]);
+			}
+
+			for (const [stagedFile, arr] of diagnostics) {
+				col.set(Uri.file(join(folder.uri.fsPath, relative(staging, stagedFile))), arr);
+			}
+		}
+	}));
 }
-
-export function deactivate() {}
