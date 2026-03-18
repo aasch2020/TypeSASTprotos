@@ -1,6 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resetSystem = exports.deleteUser = exports.promoteUser = exports.updateProfile = exports.handleRequest = void 0;
+exports.handleRequest = handleRequest;
+exports.updateProfile = updateProfile;
+exports.promoteUser = promoteUser;
+exports.deleteUser = deleteUser;
+exports.resetSystem = resetSystem;
 const state_1 = require("./state");
 // webappFakeComplex.ts
 /** @requiresRole unauth */
@@ -21,7 +25,6 @@ function handleRequest(token, body) {
         return null;
     }
 }
-exports.handleRequest = handleRequest;
 /** @requiresRole user */
 function handleUserRequest(token, body) {
     state_1.state.requireUser();
@@ -56,22 +59,18 @@ function updateProfile(userId, email) {
     state_1.state.requireUser();
     console.log(`Updating profile for ${userId} to ${email}`);
 }
-exports.updateProfile = updateProfile;
 /** @requiresRole user @raised admin */
 function promoteUser(userId) {
     state_1.state.requireUser();
     console.log(`User ${userId} promoted to admin`);
 }
-exports.promoteUser = promoteUser;
 /** @requiresRole admin */
 function deleteUser(userId) {
     state_1.state.requireAdmin();
     console.log(`Deleting user ${userId}`);
 }
-exports.deleteUser = deleteUser;
 /** @requiresRole admin */
 function resetSystem() {
     state_1.state.requireAdmin();
     console.log("System reset performed");
 }
-exports.resetSystem = resetSystem;

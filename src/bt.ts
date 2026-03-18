@@ -3,7 +3,6 @@
  * then every call site that invokes those callers, and so on (BFS up the call graph).
  * Uses ts-morph to index all calls in the project and resolve symbols.
  */
-
 import {
   Project,
   SyntaxKind,
@@ -17,13 +16,6 @@ type Caller = {
   callerFunction: string
   file: string
 }
-
-const project = new Project({
-  tsConfigFilePath: "tsconfig.json"
-})
-
-/** Map from callee symbol to list of (caller name, file) for every call site. */
-const callIndex = new Map<MorphSymbol, Caller[]>()
 
 /** Returns the name of the function/method that contains the given node, or "top-level" / "anonymous". */
 function getCallerFunction(node: Node): string {
@@ -43,7 +35,6 @@ function getCallerFunction(node: Node): string {
   return "anonymous"
 }
 
-/** Returns the symbol of the function being called (f() or obj.method()). */
 function resolveCallSymbol(call: CallExpression): MorphSymbol | undefined {
 
   const expr = call.getExpression()
@@ -59,6 +50,7 @@ function resolveCallSymbol(call: CallExpression): MorphSymbol | undefined {
   return undefined
 }
 
+
 /**
  * Indexing: walk every source file's AST and record who calls what.
  * - For each node we only care about CallExpression (f() or obj.method()).
@@ -67,35 +59,40 @@ function resolveCallSymbol(call: CallExpression): MorphSymbol | undefined {
  * After the loop, callIndex maps each callee symbol to the list of all (caller, file) pairs
  * that invoke it. reverseTrace uses this to go from a function to every place that calls it.
  */
-console.log("Indexing call sites...")
+export function buildCallIndex(project: Project): Map<MorphSymbol, Caller[]> {
+  const callIndex = new Map<MorphSymbol, Caller[]>()
 
-for (const source of project.getSourceFiles()) {
+  console.log("Indexing call sites...")
 
-  source.forEachDescendant((node) => {
+  for (const source of project.getSourceFiles()) {
 
-    if (!Node.isCallExpression(node)) return
+    source.forEachDescendant((node) => {
 
-    const sym = resolveCallSymbol(node)
-    if (!sym) return
+      if (!Node.isCallExpression(node)) return
 
-    const caller: Caller = {
-      callerFunction: getCallerFunction(node),
-      file: source.getFilePath()
-    }
+      const sym = resolveCallSymbol(node)
+      if (!sym) return
 
-    if (!callIndex.has(sym)) {
-      callIndex.set(sym, [])
-    }
+      const caller: Caller = {
+        callerFunction: getCallerFunction(node),
+        file: source.getFilePath()
+      }
 
-    callIndex.get(sym)!.push(caller)
+      if (!callIndex.has(sym)) {
+        callIndex.set(sym, [])
+      }
 
-  })
+      callIndex.get(sym)!.push(caller)
+
+    })
+  }
+
+  console.log("Index built.")
+  return callIndex
 }
 
-console.log("Index built.")
-
 /** Finds the ts-morph symbol for a function or method with the given name (first match in project). */
-function findSymbolByName(name: string): MorphSymbol | undefined {
+export function findSymbolByName(project: Project, name: string): MorphSymbol | undefined {
 
   for (const source of project.getSourceFiles()) {
 
@@ -122,13 +119,13 @@ function findSymbolByName(name: string): MorphSymbol | undefined {
 }
 
 /** BFS from the function named startName: print each caller and recurse into callers up to depth. */
-function reverseTrace(startName: string, depth = 5) {
+export function reverseTrace(project: Project, callIndex: Map<MorphSymbol, Caller[]>, startName: string, depth = 5): string[] {
 
-  const startSym = findSymbolByName(startName)
+  const startSym = findSymbolByName(project, startName)
 
   if (!startSym) {
     console.error("Function not found:", startName)
-    return
+    return []
   }
 
   const queue: { sym: MorphSymbol; level: number }[] = [
@@ -136,6 +133,7 @@ function reverseTrace(startName: string, depth = 5) {
   ]
 
   const visited = new Set<MorphSymbol>()
+  const callerNames: string[] = []
 
   while (queue.length) {
 
@@ -151,7 +149,9 @@ function reverseTrace(startName: string, depth = 5) {
         `${" ".repeat(level * 2)}${c.callerFunction} -> ${sym.getName()} (${c.file})`
       )
 
-      const callerSym = findSymbolByName(c.callerFunction)
+      callerNames.push(c.callerFunction)
+
+      const callerSym = findSymbolByName(project, c.callerFunction)
 
       if (callerSym) {
         queue.push({
@@ -164,13 +164,5 @@ function reverseTrace(startName: string, depth = 5) {
 
   }
 
+  return callerNames
 }
-
-const target = process.argv[2]
-
-if (!target) {
-  console.error("Usage: ts-node reverse-call-trace.ts <function>")
-  process.exit(1)
-}
-
-reverseTrace(target)

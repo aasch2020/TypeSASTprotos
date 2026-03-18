@@ -1,8 +1,9 @@
-import { CallExpression, FunctionDeclaration, JSDoc, MethodDeclaration, ParameterDeclaration, Project, Scope, ScriptTarget, SyntaxKind, VariableDeclarationKind } from "ts-morph";
+import { CallExpression, FunctionDeclaration, JSDoc, MethodDeclaration, Node, ParameterDeclaration, Project, Scope, ScriptTarget, SyntaxKind, VariableDeclarationKind } from "ts-morph";
 import { cp } from "fs/promises";
 import * as path from "path";
 import fs from "fs";
 import { execSync } from "child_process";
+import { buildCallIndex, reverseTrace } from "./bt.js";
 
 export function makeSymexDriver(
 	project: Project,
@@ -11,7 +12,7 @@ export function makeSymexDriver(
 	outFile: string
 ) {
 	// Use the existing project to add the source file
-	const sourceFile = project.addSourceFileAtPath(tsFile);
+	const sourceFile = project.getSourceFile(tsFile) || project.addSourceFileAtPath(tsFile);
 
 	// Find the exported function
 	const func = sourceFile.getFunction(funcName);
@@ -78,7 +79,7 @@ function findJsDocWithRaised(project: Project) {
 	}
 	return out;
 }
-function makeForSymex(targetDir: string) {
+function makeForSymex(targetDir: string, symexTargets: string[] = ["handleRequest"]) {
 	const roles = ["unauth", "user", "admin"]; // ordered lowest → highest
 
 	const project = new Project({
@@ -242,9 +243,21 @@ function makeForSymex(targetDir: string) {
 	}
 
 	console.log("All TS files instrumented. Compiling to JS...");
-	makeSymexDriver(project, "handleRequest", path.join(targetDir, "symextests.ts"), path.join(targetDir, "driver.js"))
+	for (const funcName of symexTargets) {
+		for (const sf of project.getSourceFiles()) {
+			if (sf.getFunction(funcName)) {
+				makeSymexDriver(project, funcName, sf.getFilePath(), path.join(targetDir, `driver_${funcName}.js`));
+				break;
+			}
+		}
+	}
+	// gotta rewrite in in case theres already include, then the other files
+	// not in inlcude will not be compiled 
+	fs.writeFileSync(
+		path.join(targetDir, "tsconfig.json"),
+		JSON.stringify({ compilerOptions: { module: "CommonJS", target: "ES2017" } }, null, 2)
+	);
 	try {
-		// Assumes a tsconfig.json exists in the targetDir
 		execSync(`tsc --project ${targetDir}/tsconfig.json`, { stdio: "inherit" });
 		console.log("Compilation finished. JS output generated.");
 	} catch (err) {
@@ -262,9 +275,6 @@ function makeForSymex(targetDir: string) {
 	}
 
 	const [sourceDir, targetDir, jsverSymdir] = args;
-	await cp(sourceDir, jsverSymdir, { recursive: true });
-	console.log(`Copied ${sourceDir} to ${jsverSymdir}`);
-	makeForSymex(jsverSymdir)
 	await cp(sourceDir, targetDir, { recursive: true });
 	console.log(`Copied ${sourceDir} to ${targetDir}`);
 
@@ -310,14 +320,10 @@ function makeForSymex(targetDir: string) {
 	}
 	console.log(project.getSourceFiles().map(p => p.getBaseName()))
 
-	// Helper: find all JSDoc with @raised (any JSDocable node)
-
 	for (const sourceFile of project.getSourceFiles()) {
 
 		// Find all function declarations
 		sourceFile.forEachDescendant((node) => {
-			// console.log("start")
-
 			if (
 				node.getKind() === SyntaxKind.FunctionDeclaration ||
 				node.getKind() === SyntaxKind.MethodDeclaration
@@ -404,4 +410,43 @@ function makeForSymex(targetDir: string) {
 	}
 	project.save();
 	console.log("\nDone (saved with @raised applied).");
+
+	const diags = project.getPreEmitDiagnostics();
+	console.log("\n\n\n")
+	console.log(`found ${diags.length} errors`);
+	const errorFunctions = new Set<string>();
+	for (const diag of diags) {
+		const sf = diag.getSourceFile();
+		const start = diag.getStart();
+		if (!sf || start === undefined) continue;
+		const msg = diag.getMessageText();
+		const msgText = typeof msg === "string" ? msg : msg.getMessageText();
+		const lineNum = sf.getLineAndColumnAtPos(start).line;
+		console.log(`${path.basename(sf.getFilePath())}:${lineNum}: error is ${msgText}`);
+		const node = sf.getDescendantAtPos(start);
+		if (!node) continue;
+		const fn = node.getFirstAncestor((a) =>
+			Node.isFunctionDeclaration(a) || Node.isMethodDeclaration(a)
+		);
+		if (fn && (Node.isFunctionDeclaration(fn) || Node.isMethodDeclaration(fn))) {
+			const name = fn.getName();
+			if (name) errorFunctions.add(name);
+		}
+	}
+	console.log("Functions with type errors:", [...errorFunctions]);
+
+	const callIndex = buildCallIndex(project);
+	const symexTargets = new Set<string>();
+	for (const funcName of errorFunctions) {
+		symexTargets.add(funcName);
+		const callers = reverseTrace(project, callIndex, funcName);
+		for (const c of callers) {
+			if (c !== "top-level" && c !== "anonymous") symexTargets.add(c);
+		}
+	}
+	console.log("Symex targets:", [...symexTargets]);
+
+	await cp(sourceDir, jsverSymdir, { recursive: true });
+	console.log(`Copied ${sourceDir} to ${jsverSymdir}`);
+	makeForSymex(jsverSymdir, [...symexTargets]);
 })();
