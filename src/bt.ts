@@ -1,3 +1,8 @@
+/**
+ * Reverse call tracer: given a function name, prints every call site that invokes it,
+ * then every call site that invokes those callers, and so on (BFS up the call graph).
+ * Uses ts-morph to index all calls in the project and resolve symbols.
+ */
 import {
   Project,
   SyntaxKind,
@@ -6,11 +11,13 @@ import {
   Symbol as MorphSymbol
 } from "ts-morph"
 
+/** One call site: which function contains the call and in which file. */
 type Caller = {
   callerFunction: string
   file: string
 }
 
+/** Returns the name of the function/method that contains the given node, or "top-level" / "anonymous". */
 function getCallerFunction(node: Node): string {
   const fn = node.getFirstAncestor((a) =>
     Node.isFunctionDeclaration(a) ||
@@ -43,6 +50,15 @@ function resolveCallSymbol(call: CallExpression): MorphSymbol | undefined {
   return undefined
 }
 
+
+/**
+ * Indexing: walk every source file's AST and record who calls what.
+ * - For each node we only care about CallExpression (f() or obj.method()).
+ * - sym = the symbol of the function being called (the callee).
+ * - caller = the name of the function that contains this call, and its file.
+ * After the loop, callIndex maps each callee symbol to the list of all (caller, file) pairs
+ * that invoke it. reverseTrace uses this to go from a function to every place that calls it.
+ */
 export function buildCallIndex(project: Project): Map<MorphSymbol, Caller[]> {
   const callIndex = new Map<MorphSymbol, Caller[]>()
 
@@ -75,6 +91,7 @@ export function buildCallIndex(project: Project): Map<MorphSymbol, Caller[]> {
   return callIndex
 }
 
+/** Finds the ts-morph symbol for a function or method with the given name (first match in project). */
 export function findSymbolByName(project: Project, name: string): MorphSymbol | undefined {
 
   for (const source of project.getSourceFiles()) {
@@ -101,6 +118,7 @@ export function findSymbolByName(project: Project, name: string): MorphSymbol | 
   return undefined
 }
 
+/** BFS from the function named startName: print each caller and recurse into callers up to depth. */
 export function reverseTrace(project: Project, callIndex: Map<MorphSymbol, Caller[]>, startName: string, depth = 5): string[] {
 
   const startSym = findSymbolByName(project, startName)
