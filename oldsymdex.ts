@@ -405,28 +405,46 @@ function makeForSymex(targetDir: string) {
     // Process in reverse source order so insertions don't invalidate earlier nodes
     const sorted = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
 
-    for (const { node, roleName } of sorted) {
-        const stmt = getTargetStatement(node);
-        if (!stmt || stmt.getKind() !== SyntaxKind.ExpressionStatement) continue;
-
-        const parent = stmt.getParent();
-        if (!parent || parent.getKind() !== SyntaxKind.Block) continue;
-
-        const block = parent as import("ts-morph").Block;
-        const statements = block.getStatements();
-
-        const idx = statements.findIndex(s => s.getStart() === stmt.getStart());
-        if (idx < 0) continue;
-
-        const varName = `roleContextRaised_${idx}`;
-        block.insertStatements(idx, `const ${varName}: ${roleName} = new ${roleName}();`);
-
-        const call = stmt.getFirstDescendantByKind(SyntaxKind.CallExpression);
-        if (call) {
-            const args = call.getArguments();
-            if (args.length > 0) args[0].replaceWithText(varName);
-        }
+for (const { node, roleName } of sorted) {
+    // Find the parent block
+    let blockNode = node.getParent();
+    while (blockNode && blockNode.getKind() !== SyntaxKind.Block) {
+        blockNode = blockNode.getParent();
     }
+    if (!blockNode) continue;
+
+    const block = blockNode as import("ts-morph").Block;
+    const statements = block.getStatements();
+
+    // Find the index of the `@raised` placeholder statement
+    const idx = statements.findIndex(s => s.getStart() === node.getStart());
+    if (idx < 0) continue;
+
+    const varName = `roleContextRaised_${idx}`;
+
+    // Replace the placeholder with the variable declaration
+    statements[idx].replaceWithText(`const ${varName}: ${roleName} = new ${roleName}();`);
+
+    // Replace calls in the same block **after the declaration**
+    const affectedStatements = statements.slice(idx + 1);
+    for (const stmt of affectedStatements) {
+        stmt.forEachDescendant(desc => {
+            if (desc.getKind() === SyntaxKind.CallExpression) {
+                const call = desc as CallExpression;
+                const args = call.getArguments();
+
+                if (args.length === 0) {
+                    // If no args, just add the raised variable
+                    call.addArgument(varName);
+                } else {
+                    // Move the raised variable to **last argument**
+                    const lastArg = args[args.length - 1];
+                    lastArg.replaceWithText(varName);
+                }
+            }
+        });
+    }
+}
     project.save();
     console.log("\nDone (saved with @raised applied).");
 })();

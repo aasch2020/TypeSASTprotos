@@ -6,7 +6,7 @@ export function handleRequest(token: string, body: string) {
     if (token.startsWith("user-")) {
         /**  @raised user */
         void 0;
-        return handleUserRequest(token, body);
+        handleUserRequest(token, body);
     } else if (token.startsWith("admin-")) {
         return handleAdminRequest(token, body);
     } else {
@@ -23,6 +23,7 @@ function handleUserRequest(token: string, body: string) {
         updateProfile(token, "newemail@example.com");
     } else if (body.includes("promoteSelf")) {
         /** @raised admin */
+        void 0;
         promoteUser(token);
     } else {
         console.log("Unknown user action");
