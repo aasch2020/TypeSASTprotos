@@ -1,4 +1,5 @@
 import * as esbuild from "esbuild";
+import { copyFile } from "fs/promises";
 
 /**
  * @type {import('esbuild').Plugin}
@@ -55,6 +56,8 @@ async function main() {
 
 	await ctx.rebuild();
 	await ctx2.rebuild();
+
+	await copyFile("node_modules/source-map/lib/mappings.wasm", "dist/mappings.wasm");
 }
 
 main().catch(e => {

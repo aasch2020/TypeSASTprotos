@@ -6,10 +6,9 @@ export function handleRequest(token: string, body: string) {
 
     // Branch on token prefix to simulate different access levels
     if (token.startsWith("user-")) {
-        /** @raised user */
+        // @raised user 
         return handleUserRequest(token, body);
     } else if (token.startsWith("admin-")) {
-        /** @raised admin */
         return handleAdminRequest(token, body);
     } else {
         console.log("Unauthenticated token, rejecting request");

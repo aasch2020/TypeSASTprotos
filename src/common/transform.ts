@@ -54,6 +54,7 @@ export type Reachable<
 export function requireRole<From extends Role, To extends Role>(current: RoleToken<From>, target: To): Reachable<From, To> extends true ? RoleToken<To> : never { return mkRole(target) as any; }
 export const defaultRole: Role = ${JSON.stringify(roleConfig.defaultRole)} as Role;
 `;
+	console.log("USING:", rolesGenerated);
 	const rolesPath = join(root, "roles.generated.ts");
 	await writeFile(rolesPath, rolesGenerated, "utf8");
 
@@ -255,7 +256,7 @@ export const defaultRole: Role = ${JSON.stringify(roleConfig.defaultRole)} as Ro
 		visitCalls(sf);
 
 		// Third pass: implement // @raised ROLE handling. Look for ExpressionStatements that are CallExpressions
-		// and have a single-line leading comment matching @raised ROLE. Insert a const and replace/add first arg.
+		// and have a single-line leading comment matching @raised ROLE. Insert a const and replace the requireRole argument.
 		function visitStatements(node: ts.Node) {
 			if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)) {
 				const raised = getRaisedRoleForStatement(node);
@@ -264,16 +265,24 @@ export const defaultRole: Role = ${JSON.stringify(roleConfig.defaultRole)} as Ro
 					// insert const declaration before this statement
 					const declText = `const roleContextRaised: RoleToken<"${raised}"> = mkRole("${raised}");\n`;
 					ms.appendLeft(node.getStart(), declText);
-					// alter the call: replace first arg with roleContextRaised or insert it as first arg
+					// alter the call: find the argument that is a call to requireRole and replace it
 					const call = node.expression;
 					const args = call.arguments;
-					if (args.length === 0) {
-						// insert roleContextRaised as sole argument
-						ms.appendLeft(call.getEnd() - 1, `roleContextRaised`);
-					} else {
-						// replace spans of first arg
-						const firstArg = args[0];
-						ms.overwrite(firstArg.getStart(), firstArg.getEnd(), "roleContextRaised");
+					let replaced = false;
+					for (let i = 0; i < args.length; i++) {
+						const arg = args[i];
+						// Check if the argument is a call to requireRole
+						if (ts.isCallExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === 'requireRole') {
+							// replace this argument with roleContextRaised
+							ms.overwrite(arg.getStart(), arg.getEnd(), 'roleContextRaised');
+							replaced = true;
+							break;
+						}
+					}
+					// If no requireRole call found, optionally fall back to replacing the first argument (or insert at end)
+					if (!replaced && args.length > 0) {
+						// fallback: replace first argument (conservative)
+						ms.overwrite(args[0].getStart(), args[0].getEnd(), 'roleContextRaised');
 					}
 				}
 			}
