@@ -243,7 +243,9 @@ function interpret(config: CstNode) {
 	}
 	// Every type should subsume the default role
 	for (let role of Object.keys(parsed.roles)) {
-		updateHierarchy(parsed.roles, role, parsed.defaultRole);
+		if (role !== parsed.defaultRole) {
+			updateHierarchy(parsed.roles, role, parsed.defaultRole);
+		}
 	}
 	return parsed;
 }
