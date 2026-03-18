@@ -1,4 +1,0 @@
-@role admin
-@role user
-@default unauth
-@hierarchy user < admin

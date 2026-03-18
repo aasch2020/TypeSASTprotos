@@ -1,12 +1,11 @@
-// webappFakeComplex.ts
-
 /** @requiresRole unauth */
 export function handleRequest(token: string, body: string) {
     console.log(`Received request with token="${token}" and body="${body}"`);
 
     // Branch on token prefix to simulate different access levels
     if (token.startsWith("user-")) {
-        // @raised user 
+        /**  @raised user */
+        void 0;
         return handleUserRequest(token, body);
     } else if (token.startsWith("admin-")) {
         return handleAdminRequest(token, body);

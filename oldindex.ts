@@ -94,7 +94,6 @@ function findJsDocWithRaised(project: Project) {
     return out;
 }
 
-// 🔥 NEW: resolve correct statement target
 function getTargetStatement(node: import("ts-morph").Node) {
     if (node.getKind() === SyntaxKind.ExpressionStatement) {
         return node;
@@ -105,7 +104,7 @@ function getTargetStatement(node: import("ts-morph").Node) {
 
     const block = parent as import("ts-morph").Block;
     const statements = block.getStatements();
-
+    console.log(block.getText())
     // find first statement after comment/node
     const idx = statements.findIndex(s => s.getStart() >= node.getStart());
     if (idx >= 0) return statements[idx];

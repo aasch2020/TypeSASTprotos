@@ -1,6 +1,10 @@
 {
   "compilerOptions": {
     "module": "CommonJS",
-    "target": "ES2017"
-  }
+    "target": "esnext",
+    // hello
+  },
+  "include": [
+    "symextests.ts"
+  ]
 }
