@@ -1,10 +1,6 @@
 {
   "compilerOptions": {
     "module": "CommonJS",
-    "target": "ES2017",
-    // hello
-  },
-  "include": [
-    "roles.ts"
-  ]
+    "target": "ES2017"
+  }
 }

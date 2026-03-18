@@ -251,8 +251,13 @@ function makeForSymex(targetDir: string, symexTargets: string[] = ["handleReques
 			}
 		}
 	}
+	// gotta rewrite in in case theres already include, then the other files
+	// not in inlcude will not be compiled 
+	fs.writeFileSync(
+		path.join(targetDir, "tsconfig.json"),
+		JSON.stringify({ compilerOptions: { module: "CommonJS", target: "ES2017" } }, null, 2)
+	);
 	try {
-		// Assumes a tsconfig.json exists in the targetDir
 		execSync(`tsc --project ${targetDir}/tsconfig.json`, { stdio: "inherit" });
 		console.log("Compilation finished. JS output generated.");
 	} catch (err) {
