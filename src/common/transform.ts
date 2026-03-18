@@ -51,7 +51,7 @@ export type Reachable<
     (Ns extends Role ? ( Reachable<Ns, To, Visited | From> extends true ? true : false ) : false)
   : false;
 
-export function requireRole<From extends Role, To extends Role>(current: RoleToken<From>, target: To): Reachable<From, To> extends true ? RoleToken<To> : never { return mkRole(target) as any; }
+export function requireRole<From extends Role, To extends Role>(current: RoleToken<From>, target: Reachable<From, To> extends true ? To : never): RoleToken<To> { return mkRole(target as To) as any; }
 export const defaultRole: Role = ${JSON.stringify(roleConfig.defaultRole)} as Role;
 `;
 	console.log("USING:", rolesGenerated);
@@ -258,31 +258,36 @@ export const defaultRole: Role = ${JSON.stringify(roleConfig.defaultRole)} as Ro
 		// Third pass: implement // @raised ROLE handling. Look for ExpressionStatements that are CallExpressions
 		// and have a single-line leading comment matching @raised ROLE. Insert a const and replace the requireRole argument.
 		function visitStatements(node: ts.Node) {
-			if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)) {
-				const raised = getRaisedRoleForStatement(node);
-				if (raised) {
-					if (!knownRoles.has(raised)) throw new Error(`Role "${raised}" used in @raised comment in ${filePath} but not present in roleConfig`);
-					// insert const declaration before this statement
-					const declText = `const roleContextRaised: RoleToken<"${raised}"> = mkRole("${raised}");\n`;
-					ms.appendLeft(node.getStart(), declText);
-					// alter the call: find the argument that is a call to requireRole and replace it
-					const call = node.expression;
-					const args = call.arguments;
-					let replaced = false;
-					for (let i = 0; i < args.length; i++) {
-						const arg = args[i];
-						// Check if the argument is a call to requireRole
-						if (ts.isCallExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === 'requireRole') {
-							// replace this argument with roleContextRaised
-							ms.overwrite(arg.getStart(), arg.getEnd(), 'roleContextRaised');
-							replaced = true;
-							break;
+			const isExprStmt = ts.isExpressionStatement(node);
+			const isRetStmt = ts.isReturnStatement(node);
+			if (isExprStmt || isRetStmt) {
+				const expr = isExprStmt
+					? (node as ts.ExpressionStatement).expression
+					: (node as ts.ReturnStatement).expression;
+				if (expr && ts.isCallExpression(expr)) {
+					const raised = getRaisedRoleForStatement(node as ts.Statement);
+					if (raised) {
+						if (!knownRoles.has(raised)) throw new Error(`Role "${raised}" used in @raised comment in ${filePath} but not present in roleConfig`);
+						// insert const declaration before this statement
+						const declText = `const roleContextRaised: RoleToken<"${raised}"> = mkRole("${raised}");\n`;
+						ms.appendLeft(node.getStart(), declText);
+						// alter the call: find the argument that is a call to requireRole and replace it
+						const args = expr.arguments;
+						let replaced = false;
+						for (let i = 0; i < args.length; i++) {
+							const arg = args[i];
+							// Check if the argument is a call to requireRole
+							if (ts.isCallExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === 'requireRole') {
+								// replace this argument with roleContextRaised
+								ms.overwrite(arg.getStart(), arg.getEnd(), 'roleContextRaised');
+								replaced = true;
+								break;
+							}
 						}
-					}
-					// If no requireRole call found, optionally fall back to replacing the first argument (or insert at end)
-					if (!replaced && args.length > 0) {
-						// fallback: replace first argument (conservative)
-						ms.overwrite(args[0].getStart(), args[0].getEnd(), 'roleContextRaised');
+						// If no requireRole call found, fall back to replacing the last argument (the injected roleContext)
+						if (!replaced && args.length > 0) {
+							ms.overwrite(args[args.length - 1].getStart(), args[args.length - 1].getEnd(), 'roleContextRaised');
+						}
 					}
 				}
 			}
