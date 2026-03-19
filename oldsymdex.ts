@@ -258,6 +258,77 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                 // Insert call to state.require<Role>() at the start of the function body
                 let body = fn.getBodyText();
                 fn.insertStatements(0, `state.require${roleType[0].toUpperCase() + roleType.slice(1)}();`)
+                const becomesTag = jsDocs
+                    .flatMap(doc => doc.getTags())
+                    .find(tag => tag.getTagName() === "becomesRole");
+
+                if (becomesTag) {
+                    const raw = becomesTag.getComment();
+                    const becomesRole = (typeof raw === "string"
+                        ? raw.trim()
+                        : becomesTag.getCommentText()?.trim()) ?? "";
+
+                    if (becomesRole) {
+                        const references = fn.findReferencesAsNodes();
+
+                        // Process in reverse source order so insertions don't corrupt
+                        // earlier node positions within the same block.
+                        const callSites: CallExpression[] = [];
+
+                        for (const reference of references) {
+                            const callExpression = reference.getFirstAncestorByKind(SyntaxKind.CallExpression);
+                            if (!callExpression) continue;
+
+                            const expr = callExpression.getExpression();
+                            let isMatch = false;
+
+                            if (expr.isKind(SyntaxKind.Identifier)) {
+                                const refSymbol = reference.getSymbol();
+                                const exprSymbol = expr.getSymbol();
+                                if (refSymbol && exprSymbol && refSymbol === exprSymbol) isMatch = true;
+                            } else if (expr.isKind(SyntaxKind.PropertyAccessExpression)) {
+                                const refSymbol = reference.getSymbol();
+                                const nameSymbol = expr.getNameNode().getSymbol();
+                                if (refSymbol && nameSymbol && refSymbol === nameSymbol) isMatch = true;
+                            }
+
+                            if (isMatch) callSites.push(callExpression);
+                        }
+
+                        // Sort in reverse source order before mutating
+                        callSites.sort((a, b) => b.getStart() - a.getStart());
+
+                        for (const callExpression of callSites) {
+                            // Walk up to the nearest ExpressionStatement or VariableStatement
+                            let stmtNode: import("ts-morph").Node | undefined = callExpression.getParent();
+                            while (
+                                stmtNode &&
+                                stmtNode.getKind() !== SyntaxKind.ExpressionStatement &&
+                                stmtNode.getKind() !== SyntaxKind.VariableStatement
+                            ) {
+                                stmtNode = stmtNode.getParent();
+                            }
+                            if (!stmtNode) continue;
+
+                            const blockNode = stmtNode.getParent();
+                            if (!blockNode || blockNode.getKind() !== SyntaxKind.Block) continue;
+
+                            const block = blockNode.asKindOrThrow(SyntaxKind.Block);
+                            const statements = block.getStatements();
+                            const idx = statements.findIndex(s => s.getStart() === stmtNode!.getStart());
+                            if (idx < 0) continue;
+
+                            // Insert state.raise("<becomesRole>") immediately after the call statement
+                            block.insertStatements(idx + 1, `state.raise("${becomesRole}");`);
+
+                            console.log(
+                                `[becomesRole/symex] Inserted state.raise("${becomesRole}") ` +
+                                `after call at line ${callExpression.getStartLineNumber()} ` +
+                                `in ${callExpression.getSourceFile().getBaseName()}`
+                            );
+                        }
+                    }
+                }
             }
         });
         const originalPath = sourceFile.getFilePath();
@@ -273,29 +344,33 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
         console.log(`${path.basename(sf.getFilePath())}:${line} ${node.getKindName()} @raised ${roleName}`);
     }
 
-    // Sort in reverse source order so insertions don't break earlier node positions
-    // const sorted = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
+    // Process in reverse source order so insertions don't corrupt earlier positions
+    const sortedRaised = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
 
-    // for (const { node, roleName } of sorted) {
-    //     // Only insert inside a Block
-    //     const parent = node.getParent();
-    //     if (!parent || parent.getKind() !== SyntaxKind.Block) continue;
+    for (const { node, roleName } of sortedRaised) {
+        // Walk up to find the parent Block
+        let blockNode = node.getParent();
+        while (blockNode && blockNode.getKind() !== SyntaxKind.Block) {
+            blockNode = blockNode.getParent();
+        }
+        if (!blockNode) continue;
 
-    //     const block = parent as import("ts-morph").Block;
+        const block = blockNode.asKindOrThrow(SyntaxKind.Block);
+        const statements = block.getStatements();
 
-    //     // Find the index of the original node
-    //     const statements = block.getStatements();
-    //     const idx = statements.findIndex(s => s.getStart() === node.getStart());
-    //     if (idx < 0) continue;
+        // Find the `void 0;` placeholder that findJsDocWithRaised inserted
+        const idx = statements.findIndex(s => s.getStart() === node.getStart());
+        if (idx < 0) continue;
 
-    //     block.insertStatements(idx, `state.raise("${roleName}");`);
-    // }
+        // Replace placeholder with state.raise call — same mechanism as the main
+        // flow's `const roleContextRaised_N` replacement, but using state.raise
+        // since makeForSymex operates on the runtime state machine, not type vars.
+        statements[idx].replaceWithText(`state.raise("${roleName}");`);
+
+        console.log(`[raised/symex] Replaced void 0 with state.raise("${roleName}") at idx ${idx} in ${node.getSourceFile().getBaseName()}`);
+    }
 
     project.saveSync();
-
-    for (const sourceFile of project.getSourceFiles()) {
-        insertStateRaiseSimple(sourceFile.getFilePath())
-    }
 
     console.log("All TS files instrumented. Compiling to JS...");
     for (let i = 0; i < entryPoints.length; i++) {
@@ -486,11 +561,7 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                         if (idx < 0) continue
 
                         const varName = `roleContextBecome_${idx}`
-                        // block.insertStatements(idx + 1, `const ${varName}: ${becomesType} = new ${becomesType}();`)
-
-                        const insertedStmt = block.getStatements()[idx + 1]
-                        const insertPos = insertedStmt.getEnd()
-                        console.log(`[becomesRole] insertPos=${insertPos}, varName=${varName}`)
+                        console.log(`[becomesRole] varName=${varName}`)
 
                         block.insertStatements(idx + 1, `const ${varName}: ${becomesType} = new ${becomesType}();`)
 
@@ -536,7 +607,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
     }
     // Apply @raised: find JSDoc with @raised (after tree has roleContext), insert variable and use it in the call
     const jsDocWithRaised = findJsDocWithRaised(project);
-    project.saveSync()
     console.log("\n--- JSDoc with @raised (ts-morph) ---");
     for (const { node, roleName } of jsDocWithRaised) {
         const sf = node.getSourceFile();
@@ -553,7 +623,7 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
         }
         if (!blockNode) continue;
 
-        const block = blockNode as import("ts-morph").Block;
+        const block = blockNode.asKindOrThrow(SyntaxKind.Block);
         const statements = block.getStatements();
 
         // Find the index of the `@raised` placeholder statement
