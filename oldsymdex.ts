@@ -260,8 +260,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                 fn.insertStatements(0, `state.require${roleType[0].toUpperCase() + roleType.slice(1)}();`)
             }
         });
-
-        // Save each file individually (optional: can rename if you want)
         const originalPath = sourceFile.getFilePath();
         sourceFile.saveSync();
         console.log(`Saved annotated file: ${originalPath}`);
@@ -412,13 +410,22 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                         type: classNames[0],
                         initializer: "new " + classNames[0]
                     });
+                    return
+                }
 
-                    return;
-                } // nothing to add if no @requiresRole
+
 
                 const reqRaw = requiresRoleTag.getComment();
                 const roleType = (typeof reqRaw === "string" ? reqRaw.trim() : requiresRoleTag.getCommentText()?.trim()) ?? classNames[0];
                 const references = fn.findReferencesAsNodes();
+                fn.addParameter({
+                    name: "roleContext",
+                    type: roleType,
+                    hasQuestionToken: true,
+                });
+                const becomesTag = jsDocs
+                    .flatMap(doc => doc.getTags())
+                    .find(tag => tag.getTagName() === "becomesRole")
 
                 for (const reference of references) {
                     // The reference is a symbol usage node (Identifier, etc.)
@@ -445,7 +452,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
 
                         callExpression.addArgument("roleContext");
                     }
-                    // Case 2: method call like account.updateEmail(...)
                     if (expr.isKind(SyntaxKind.PropertyAccessExpression)) {
                         const refSymbol = reference.getSymbol();
                         const nameSymbol = expr.getNameNode().getSymbol();
@@ -461,14 +467,46 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
 
                         callExpression.addArgument("roleContext");
                     }
+                    if (becomesTag && callExpression) {
+                        const raw = becomesTag.getComment()
+                        const becomesType = (typeof raw === "string" ? raw : becomesTag.getCommentText() ?? "").trim()
+
+                        let stmtNode = callExpression.getParent()
+                        while (stmtNode && stmtNode.getKind() !== SyntaxKind.ExpressionStatement && stmtNode.getKind() !== SyntaxKind.VariableStatement) {
+                            stmtNode = stmtNode.getParent()
+                        }
+                        if (!stmtNode) continue
+
+                        const blockNode = stmtNode.getParent()
+                        if (!blockNode || blockNode.getKind() !== SyntaxKind.Block) continue
+
+                        const block = blockNode.asKindOrThrow(SyntaxKind.Block)
+                        const statements = block.getStatements()
+                        const idx = statements.findIndex(s => s.getStart() === stmtNode!.getStart())
+                        if (idx < 0) continue
+
+                        const varName = `roleContextBecome_${idx}`
+                        // block.insertStatements(idx + 1, `const ${varName}: ${becomesType} = new ${becomesType}();`)
+
+                        const insertedStmt = block.getStatements()[idx + 1]
+                        const insertPos = insertedStmt.getEnd()
+                        console.log(`[becomesRole] insertPos=${insertPos}, varName=${varName}`)
+
+                        block.insertStatements(idx + 1, `const ${varName}: ${becomesType} = new ${becomesType}();`)
+
+                        const affectedStatements = block.getStatements().slice(idx + 2)
+                        for (const stmt of affectedStatements) {
+                            stmt.forEachDescendant(desc => {
+                                if (desc.getKind() !== SyntaxKind.CallExpression) return
+                                const call = desc as CallExpression
+                                const roleArgIdx = call.getArguments().findIndex(a => a.getText() === "roleContext")
+                                if (roleArgIdx >= 0) call.getArguments()[roleArgIdx].replaceWithText(varName)
+                            })
+                        }
+                    }
                 }
 
 
-                // Add parameter named roleContext with type equal to the requiresRole
-                fn.addParameter({
-                    name: "roleContext",
-                    type: roleType,
-                });
             }
         });
 
@@ -527,24 +565,14 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
         // Replace the placeholder with the variable declaration
         statements[idx].replaceWithText(`const ${varName}: ${roleName} = new ${roleName}();`);
 
-        // Replace calls in the same block **after the declaration**
-        const affectedStatements = statements.slice(idx + 1);
+        const affectedStatements = block.getStatements().slice(idx + 1)
         for (const stmt of affectedStatements) {
             stmt.forEachDescendant(desc => {
-                if (desc.getKind() === SyntaxKind.CallExpression) {
-                    const call = desc as CallExpression;
-                    const args = call.getArguments();
-
-                    if (args.length === 0) {
-                        // If no args, just add the raised variable
-                        call.addArgument(varName);
-                    } else {
-                        // Move the raised variable to **last argument**
-                        const lastArg = args[args.length - 1];
-                        lastArg.replaceWithText(varName);
-                    }
-                }
-            });
+                if (desc.getKind() !== SyntaxKind.CallExpression) return
+                const call = desc as CallExpression
+                const roleArgIdx = call.getArguments().findIndex(a => a.getText() === "roleContext")
+                if (roleArgIdx >= 0) call.getArguments()[roleArgIdx].replaceWithText(varName)
+            })
         }
     }
     project.save();
