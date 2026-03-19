@@ -117,10 +117,26 @@ export function findSymbolByName(project: Project, name: string): MorphSymbol | 
 
   return undefined
 }
+function findCallSites(sym: MorphSymbol): Caller[] {
+  const decl = sym.getDeclarations()[0]
+  if (!decl) return []
 
-/** BFS from the function named startName: print each caller and recurse into callers up to depth. */
-export function reverseTrace(project: Project, callIndex: Map<MorphSymbol, Caller[]>, startName: string, depth = 5): string[] {
+  const refs = decl.asKind(SyntaxKind.FunctionDeclaration)?.findReferencesAsNodes()
+    ?? decl.asKind(SyntaxKind.MethodDeclaration)?.findReferencesAsNodes()
+    ?? []
 
+  return refs
+    .filter((ref) => {
+      const parent = ref.getParent()
+      return parent !== undefined && Node.isCallExpression(parent)
+    })
+    .map((ref) => ({
+      callerFunction: getCallerFunction(ref),
+      file: ref.getSourceFile().getFilePath()
+    }))
+}
+
+export function reverseTrace(project: Project, startName: string, depth = 5): string[] {
   const startSym = findSymbolByName(project, startName)
 
   if (!startSym) {
@@ -136,33 +152,54 @@ export function reverseTrace(project: Project, callIndex: Map<MorphSymbol, Calle
   const callerNames: string[] = []
 
   while (queue.length) {
-
     const { sym, level } = queue.shift()!
-    if (visited.has(sym)) continue
+    if (visited.has(sym) || level >= depth) continue
     visited.add(sym)
 
-    const callers = callIndex.get(sym) || []
-
-    for (const c of callers) {
-
-      console.log(
-        `${" ".repeat(level * 2)}${c.callerFunction} -> ${sym.getName()} (${c.file})`
-      )
-
+    for (const c of findCallSites(sym)) {
+      console.log(`${" ".repeat(level * 2)}${c.callerFunction} -> ${sym.getName()} (${c.file})`)
       callerNames.push(c.callerFunction)
 
       const callerSym = findSymbolByName(project, c.callerFunction)
-
-      if (callerSym) {
-        queue.push({
-          sym: callerSym,
-          level: level + 1
-        })
-      }
-
+      if (callerSym) queue.push({ sym: callerSym, level: level + 1 })
     }
-
   }
 
   return callerNames
+}
+export function reverseTraceUntilRole(
+  project: Project,
+  startName: string,
+  requiredType: string,
+  depth = 10
+): string[] {
+  const startSym = findSymbolByName(project, startName)
+  if (!startSym) return []
+  const queue: { sym: MorphSymbol; level: number }[] = [{ sym: startSym, level: 0 }]
+  const visited = new Set<MorphSymbol>()
+  const results: string[] = []
+  while (queue.length) {
+    const { sym, level } = queue.shift()!
+    if (visited.has(sym) || level >= depth) continue
+    visited.add(sym)
+    for (const c of findCallSites(sym)) {
+      const callerSym = findSymbolByName(project, c.callerFunction)
+      if (!callerSym) continue
+      const decl = callerSym.getDeclarations()[0]
+      const fn = decl?.asKind(SyntaxKind.FunctionDeclaration)
+        ?? decl?.asKind(SyntaxKind.MethodDeclaration)
+      if (!fn) continue
+      const roleParam = fn.getParameters().find(p => p.getName() === "roleContext")
+      const roleParamType = roleParam?.getType().getText()
+      const shortType = roleParamType?.split(".").pop() ?? roleParamType
+      console.log(`${"  ".repeat(level)}${c.callerFunction} -> ${sym.getName()} (roleContext: ${shortType})`)
+      if (shortType === requiredType) {
+        console.log(`${"  ".repeat(level + 1)}^ found: '${c.callerFunction}' has required role '${requiredType}'`)
+        results.push(c.callerFunction)
+        continue
+      }
+      queue.push({ sym: callerSym, level: level + 1 })
+    }
+  }
+  return results
 }

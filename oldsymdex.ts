@@ -1,9 +1,9 @@
-import { CallExpression, FunctionDeclaration, JSDoc, MethodDeclaration, ParameterDeclaration, Project, Scope, ScriptTarget, SyntaxKind, VariableDeclarationKind } from "ts-morph";
+import { CallExpression, FunctionDeclaration, JSDoc, MethodDeclaration, ParameterDeclaration, Project, Scope, ScriptTarget, SyntaxKind, ts, VariableDeclarationKind } from "ts-morph";
 import { cp } from "fs/promises";
 import * as path from "path";
 import fs from "fs";
 import { execSync } from "child_process";
-
+import { buildCallIndex, reverseTrace, reverseTraceUntilRole } from "./src/bt"
 export function makeSymexDriver(
     project: Project,
     funcName: string,
@@ -138,8 +138,7 @@ function findJsDocWithRaised(project: Project) {
 
     return out;
 }
-function makeForSymex(targetDir: string, roles: string[]) {
-
+function makeForSymex(targetDir: string, roles: string[], entryPoints: string[], entryFiles: string[]) {
     const project = new Project({
         compilerOptions: {
             target: ScriptTarget.ES2024,
@@ -301,7 +300,9 @@ function makeForSymex(targetDir: string, roles: string[]) {
     }
 
     console.log("All TS files instrumented. Compiling to JS...");
-    makeSymexDriver(project, "handleRequest", path.join(targetDir, "symextests.ts"), path.join(targetDir, "driver.js"))
+    for (let i = 0; i < entryPoints.length; i++) {
+        makeSymexDriver(project, entryPoints[i], path.join(targetDir, entryFiles[i]), path.join(targetDir, `driver_${i}.js`))
+    }
     try {
         // Assumes a tsconfig.json exists in the targetDir
         execSync(`tsc --project ${targetDir}/tsconfig.json`, { stdio: "inherit" });
@@ -350,7 +351,7 @@ function makeForSymex(targetDir: string, roles: string[]) {
     const rolesLine = rolesTag.getCommentText(); // "0 < user < admin"
 
     const classNames = rolesLine!.split("<").map(s => s.trim());
-    makeForSymex(jsverSymdir, classNames)
+
     console.log(classNames);
 
     for (let i = 0; i < classNames.length; i++) {
@@ -444,6 +445,22 @@ function makeForSymex(targetDir: string, roles: string[]) {
 
                         callExpression.addArgument("roleContext");
                     }
+                    // Case 2: method call like account.updateEmail(...)
+                    if (expr.isKind(SyntaxKind.PropertyAccessExpression)) {
+                        const refSymbol = reference.getSymbol();
+                        const nameSymbol = expr.getNameNode().getSymbol();
+
+                        if (!refSymbol || !nameSymbol) continue;
+                        if (refSymbol !== nameSymbol) continue;
+
+                        console.log(
+                            `Found method call in file: ${callExpression.getSourceFile().getFilePath()} ` +
+                            `at line ${callExpression.getStartLineNumber()} ` +
+                            `with full text ${callExpression.getFullText()}`
+                        );
+
+                        callExpression.addArgument("roleContext");
+                    }
                 }
 
 
@@ -531,5 +548,45 @@ function makeForSymex(targetDir: string, roles: string[]) {
         }
     }
     project.save();
-    console.log("\nDone (saved with @raised applied).");
+    // const callIndex = buildCallIndex(project);
+
+    const entryPoints: string[] = []
+    const entryFiles: string[] = []
+    for (const diag of project.getPreEmitDiagnostics()) {
+        const sf = diag.getSourceFile()
+        const start = diag.getStart()
+        if (!sf || start === undefined) continue
+
+        let node = sf.getDescendantAtPos(start)
+        if (!node) continue
+
+        let current = node.getParent()
+        let fnName: string | undefined
+        while (current) {
+            const kind = current.getKind()
+            if (kind === SyntaxKind.FunctionDeclaration || kind === SyntaxKind.MethodDeclaration) {
+                const fn = current as FunctionDeclaration | MethodDeclaration
+                const name = fn.getName()
+                if (name) fnName = name
+                break
+            }
+            current = current.getParent()
+        }
+        if (!fnName) continue
+
+        const msg = ts.flattenDiagnosticMessageText(diag.compilerObject.messageText, "\n")
+        const requiredTypeMatch = msg.match(/parameter of type '(\w+)'/)
+        if (!requiredTypeMatch) continue
+        const requiredType = requiredTypeMatch[1]
+        console.log(`\nError in '${fnName}': needs '${requiredType}' (${msg.split("\n")[0]})`)
+        const trace = reverseTraceUntilRole(project, fnName, requiredType)
+        console.log(`Trace: [${trace.join(" -> ")}]`)
+        if (trace[0]) {
+            entryPoints.push(trace[0])
+            entryFiles.push(path.basename(sf.getFilePath()))
+            console.log(`[entry point] '${trace[0]}' in '${path.basename(sf.getFilePath())}'`)
+        }
+    }
+
+    makeForSymex(jsverSymdir, classNames, entryPoints, entryFiles)
 })();
