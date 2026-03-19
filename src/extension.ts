@@ -30,6 +30,7 @@ export function activate(ctx: ExtensionContext) {
 				window.showErrorMessage("Code transform failed. See extension console.");
 				return;
 			}
+			console.log(staging);
 
 			const config = ts.getParsedCommandLineOfConfigFile(join(staging, "tsconfig.json"), {}, {
 				...ts.sys,
