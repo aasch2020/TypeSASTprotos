@@ -57,7 +57,22 @@ function insertStateRaiseSimple(filePath: string) {
     code = code.replace(regex, (x, role) => {
         console.log(x, role)
         // Replace the @raised comment with the state.raise call
-        return `state.raise("${role}");`;
+        return `${x} \n void 0;`;
+    });
+
+    fs.writeFileSync(filePath, code);
+}
+
+function anchorhack(filePath: string) {
+    let code = fs.readFileSync(filePath, "utf-8");
+
+    // Match lines with @raised <role>
+    const regex = /\/\*\*\s*@raised\s+([a-zA-Z0-9_-]+)\s*\*\//g;
+
+    code = code.replace(regex, (x, role) => {
+        console.log(x, role)
+        // Replace the @raised comment with the state.raise call
+        return `${x} \n void 0;`;
     });
 
     fs.writeFileSync(filePath, code);
@@ -65,23 +80,65 @@ function insertStateRaiseSimple(filePath: string) {
 function findJsDocWithRaised(project: Project) {
     type RaisedEntry = { node: import("ts-morph").Node; roleName: string };
     const out: RaisedEntry[] = [];
+
     for (const sf of project.getSourceFiles()) {
         sf.forEachDescendant((node) => {
-            const getJsDocs = (node as { getJsDocs?: () => { getTags: () => { getTagName: () => string; getComment: () => unknown; getCommentText: () => string } }[] }).getJsDocs;
+
+            const getJsDocs = (node as {
+                getJsDocs?: () => {
+                    getTags: () => {
+                        getTagName: () => string;
+                        getComment: () => unknown;
+                        getCommentText: () => string;
+                    }[];
+                }[];
+            }).getJsDocs;
+
             if (typeof getJsDocs !== "function") return;
+
             const docs = getJsDocs.call(node);
             if (!docs?.length) return;
-            const raisedTag = docs.flatMap(d => d.getTags()).find(t => t.getTagName() === "raised");
+
+            const raisedTag = docs
+                .flatMap(d => d.getTags())
+                .find(t => t.getTagName() === "raised");
+
             if (!raisedTag) return;
+
             const raw = raisedTag.getComment();
-            const roleName = (typeof raw === "string" ? raw : raisedTag.getCommentText() ?? "").trim();
-            if (roleName) out.push({ node, roleName });
+            const roleName =
+                (typeof raw === "string"
+                    ? raw
+                    : raisedTag.getCommentText() ?? ""
+                ).trim();
+
+            if (!roleName) return;
+            const parent = node.getParent();
+
+            // only insert inside blocks (functions, methods, etc.)
+            if (parent && parent.getKindName() === "Block") {
+                const block = parent.asKindOrThrow(SyntaxKind.Block);
+
+                // find safe insertion point: first statement in block
+                const stmts = block.getStatements();
+
+                // avoid duplicate insertion
+                const alreadyHasMarker = stmts.some(s =>
+                    s.getText().trim() === "void 0;"
+                );
+
+                if (!alreadyHasMarker) {
+                    block.insertStatements(0, "void 0;");
+                }
+            }
+
+            out.push({ node, roleName });
         });
     }
+
     return out;
 }
-function makeForSymex(targetDir: string) {
-    const roles = ["unauth", "user", "admin"]; // ordered lowest ΓåÆ highest
+function makeForSymex(targetDir: string, roles: string[]) {
 
     const project = new Project({
         compilerOptions: {
@@ -261,10 +318,16 @@ function makeForSymex(targetDir: string) {
     const jsverSymdir = "examples/gen3"
     await cp(sourceDir, jsverSymdir, { recursive: true });
     console.log(`Copied ${sourceDir} to ${jsverSymdir}`);
-    makeForSymex(jsverSymdir)
+
     await cp(sourceDir, targetDir, { recursive: true });
     console.log(`Copied ${sourceDir} to ${targetDir}`);
+    for (const dir of [targetDir, jsverSymdir]) { // this is stupid and dumb but needed
+        for (const file of fs.readdirSync(dir)) {
+            if (!file.endsWith(".ts")) continue;
 
+            anchorhack(`${dir}/${file}`);
+        }
+    }
     const project = new Project({
         compilerOptions: {
             target: ScriptTarget.ES2024
@@ -287,7 +350,7 @@ function makeForSymex(targetDir: string) {
     const rolesLine = rolesTag.getCommentText(); // "0 < user < admin"
 
     const classNames = rolesLine!.split("<").map(s => s.trim());
-
+    makeForSymex(jsverSymdir, classNames)
     console.log(classNames);
 
     for (let i = 0; i < classNames.length; i++) {
@@ -296,13 +359,13 @@ function makeForSymex(targetDir: string) {
 
         const cls = sourceFile.addClass({
             name: clsName,
+            isExported: true,
             extends: parentName,
         });
 
-        // Add methods for this class
         cls.addMethod({
             name: `c${clsName}`,
-            returnType: "void"
+            returnType: "void",
         });
     }
     console.log(project.getSourceFiles().map(p => p.getBaseName()))
@@ -311,7 +374,12 @@ function makeForSymex(targetDir: string) {
 
 
     for (const sourceFile of project.getSourceFiles()) {
-
+        if (sourceFile.getBaseName() !== "roles.ts") {
+            sourceFile.insertStatements(
+                0,
+                `import { ${classNames.join(", ")} } from "./roles";`
+            );
+        }
         // Find all function declarations
         sourceFile.forEachDescendant((node) => {
             // console.log("start")
@@ -413,13 +481,13 @@ function makeForSymex(targetDir: string) {
     }
     // Apply @raised: find JSDoc with @raised (after tree has roleContext), insert variable and use it in the call
     const jsDocWithRaised = findJsDocWithRaised(project);
+    project.saveSync()
     console.log("\n--- JSDoc with @raised (ts-morph) ---");
     for (const { node, roleName } of jsDocWithRaised) {
         const sf = node.getSourceFile();
         const line = node.getStartLineNumber();
         console.log(`${path.basename(sf.getFilePath())}:${line} ${node.getKindName()} @raised ${roleName}`);
     }
-    // Process in reverse source order so insertions don't invalidate earlier nodes
     const sorted = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
 
     for (const { node, roleName } of sorted) {
