@@ -10,22 +10,14 @@ export function makeSymexDriver(
     tsFile: string,
     outFile: string
 ) {
-
-
-    // Use the existing project to add the source file
     const sourceFile = project.addSourceFileAtPath(tsFile);
 
-    // Find the exported function
     const func = sourceFile.getFunction(funcName);
     if (!func) throw new Error(`Function ${funcName} not found in ${tsFile}`);
+    console.log(funcName + "driver gen")
 
-    // Collect parameter names
-    const params = func.getParameters().map((p: ParameterDeclaration) => p.getName());
-
-    // Determine the JS file path (assume same name, .js)
     const jsModule = "./" + path.basename(tsFile, ".ts");
 
-    // Generate driver code
     const lines: string[] = [];
     lines.push(`/* Generated symbolic driver for ${funcName} */`);
     lines.push(`var S$ = require("S$");`);
@@ -33,16 +25,35 @@ export function makeSymexDriver(
     lines.push(`var { ${funcName} } = require("${jsModule}");`);
     lines.push(`var out;`);
 
-    // Create symbolic inputs
-    params.forEach(p => {
-        lines.push(`var ${p} = S$.symbol("${p}", "");`);
-    });
+    function buildSymex(type: import("ts-morph").Type, path: string): string {
+        if (type.isString()) return `S$.symbol("${path}", "")`;
+        if (type.isNumber()) return `S$.symbol("${path}", 0)`;
+        if (type.isBoolean()) return `S$.symbol("${path}", false)`;
+        if (type.isObject()) {
+            const props = type.getProperties();
+            const fields = props.map(prop => {
+                const decl = prop.getValueDeclaration();
+                const propType = decl ? decl.getType() : prop.getDeclaredType();
+                return `${prop.getName()}: ${buildSymex(propType, `${path}.${prop.getName()}`)}`;
+            });
+            return `{ ${fields.join(", ")} }`;
+        }
+        // fallback for unknown types
+        return `S$.symbol("${path}", "")`;
+    }
 
-    // Call the function
-    lines.push(`out = ${funcName}(${params.join(", ")});`);
+    const callArgs: string[] = [];
+
+    for (const p of func.getParameters()) {
+        const name = p.getName();
+        const type = p.getType();
+        lines.push(`var ${name} = ${buildSymex(type, name)};`);
+        callArgs.push(name);
+    }
+
+    lines.push(`out = ${funcName}(${callArgs.join(", ")});`);
     lines.push(`console.log("Symbolic output:", out);`);
 
-    // Wrap in a verify function
     const driverCode = `function verify() {\n  ${lines.join("\n  ")}\n}\nverify();\n`;
 
     fs.writeFileSync(outFile, driverCode, "utf-8");
@@ -122,14 +133,6 @@ function findJsDocWithRaised(project: Project) {
                 // find safe insertion point: first statement in block
                 const stmts = block.getStatements();
 
-                // avoid duplicate insertion
-                const alreadyHasMarker = stmts.some(s =>
-                    s.getText().trim() === "void 0;"
-                );
-
-                if (!alreadyHasMarker) {
-                    block.insertStatements(0, "void 0;");
-                }
             }
 
             out.push({ node, roleName });
@@ -271,8 +274,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                     if (becomesRole) {
                         const references = fn.findReferencesAsNodes();
 
-                        // Process in reverse source order so insertions don't corrupt
-                        // earlier node positions within the same block.
                         const callSites: CallExpression[] = [];
 
                         for (const reference of references) {
@@ -295,11 +296,10 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                             if (isMatch) callSites.push(callExpression);
                         }
 
-                        // Sort in reverse source order before mutating
+
                         callSites.sort((a, b) => b.getStart() - a.getStart());
 
                         for (const callExpression of callSites) {
-                            // Walk up to the nearest ExpressionStatement or VariableStatement
                             let stmtNode: import("ts-morph").Node | undefined = callExpression.getParent();
                             while (
                                 stmtNode &&
@@ -344,7 +344,7 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
         console.log(`${path.basename(sf.getFilePath())}:${line} ${node.getKindName()} @raised ${roleName}`);
     }
 
-    // Process in reverse source order so insertions don't corrupt earlier positions
+
     const sortedRaised = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
 
     for (const { node, roleName } of sortedRaised) {
@@ -802,16 +802,35 @@ function collectCallSitesForFn(
         if (!fnName) continue
 
         const msg = ts.flattenDiagnosticMessageText(diag.compilerObject.messageText, "\n")
+
+        // Handle type mismatch errors
         const requiredTypeMatch = msg.match(/parameter of type '(\w+)'/)
-        if (!requiredTypeMatch) continue
-        const requiredType = requiredTypeMatch[1]
-        console.log(`\nError in '${fnName}': needs '${requiredType}' (${msg.split("\n")[0]})`)
-        const trace = reverseTraceUntilRole(project, fnName, requiredType)
-        console.log(`Trace: [${trace.join(" -> ")}]`)
-        if (trace[0]) {
-            entryPoints.push(trace[0])
-            entryFiles.push(path.basename(sf.getFilePath()))
-            console.log(`[entry point] '${trace[0]}' in '${path.basename(sf.getFilePath())}'`)
+
+        // Handle argument count mismatch errors
+        const argCountMatch = msg.match(/Expected (\d+) arguments?, but got (\d+)/)
+
+        if (!requiredTypeMatch && !argCountMatch) continue
+
+        if (requiredTypeMatch) {
+            const requiredType = requiredTypeMatch[1]
+            console.log(`\nError in '${fnName}': needs '${requiredType}' (${msg.split("\n")[0]})`)
+            const trace = reverseTraceUntilRole(project, fnName, requiredType)
+            console.log(`Trace: [${trace.join(" -> ")}]`)
+            if (trace[0]) {
+                entryPoints.push(trace[0])
+                entryFiles.push(path.basename(sf.getFilePath()))
+                console.log(`[entry point] '${trace[0]}' in '${path.basename(sf.getFilePath())}'`)
+            }
+        } else if (argCountMatch) {
+            const [, expected, got] = argCountMatch
+            console.log(`\nError in '${fnName}': expected ${expected} args but got ${got} (${msg.split("\n")[0]})`)
+            const trace = reverseTrace(project, fnName)
+            console.log(`Trace: [${trace.join(" -> ")}]`)
+            if (trace[0]) {
+                entryPoints.push(trace[0])
+                entryFiles.push(path.basename(sf.getFilePath()))
+                console.log(`[entry point] '${trace[0]}' in '${path.basename(sf.getFilePath())}'`)
+            }
         }
     }
 
