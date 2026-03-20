@@ -386,6 +386,135 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
 
 
 }
+
+/**
+ * Given a function/method node, collect all CallExpression nodes that invoke it,
+ * including indirect calls through variable aliases like:
+ *   const x = func;
+ *   x();               // <-- this must be caught
+ *   let y = x; y();   // <-- transitive aliases also caught
+ */
+function collectCallSitesForFn(
+    fn: FunctionDeclaration | MethodDeclaration
+): CallExpression[] {
+    const callSites: CallExpression[] = [];
+    const fnSymbol = fn.getSymbol();
+    if (!fnSymbol) return callSites;
+
+    // Track all symbols that are known aliases for this function.
+    // Seed with the function's own symbol.
+    const aliasedSymbols = new Set<import("ts-morph").Symbol>([fnSymbol]);
+
+    // We iterate to a fixed point: as we discover new alias symbols we scan
+    // all references again to find further aliases.
+    let changed = true;
+    while (changed) {
+        changed = false;
+
+        for (const sym of [...aliasedSymbols]) {
+            // findReferencesAsNodes() only exists on specific narrowed node types,
+            // not the base Node. Walk declarations and find one that supports it,
+            // falling back to the name-node (Identifier) which always has it.
+            const decls = sym.getDeclarations();
+            if (!decls.length) continue;
+
+            let refNodes: import("ts-morph").Node[] | undefined;
+            for (const decl of decls) {
+                const asAny = decl as any;
+                if (typeof asAny.findReferencesAsNodes === "function") {
+                    refNodes = asAny.findReferencesAsNodes() as import("ts-morph").Node[];
+                    break;
+                }
+                // VariableDeclaration / BindingElement etc. expose the method on
+                // their name node (an Identifier), which always has it.
+                const nameNode = asAny.getNameNode?.();
+                if (nameNode && typeof (nameNode as any).findReferencesAsNodes === "function") {
+                    refNodes = (nameNode as any).findReferencesAsNodes() as import("ts-morph").Node[];
+                    break;
+                }
+            }
+            if (!refNodes) continue;
+
+            for (const refNode of refNodes) {
+
+                // ── Case 1: direct or method call  ───────────────────────────
+                // e.g. func(...)  or  obj.func(...)
+                const callExpr = refNode.getFirstAncestorByKind(SyntaxKind.CallExpression);
+                if (callExpr) {
+                    const expr = callExpr.getExpression();
+                    let isDirectCallee = false;
+
+                    if (expr.isKind(SyntaxKind.Identifier)) {
+                        const exprSym = expr.getSymbol();
+                        if (exprSym && aliasedSymbols.has(exprSym)) isDirectCallee = true;
+                    } else if (expr.isKind(SyntaxKind.PropertyAccessExpression)) {
+                        const nameSym = expr.getNameNode().getSymbol();
+                        if (nameSym && aliasedSymbols.has(nameSym)) isDirectCallee = true;
+                    }
+
+                    if (isDirectCallee && !callSites.includes(callExpr)) {
+                        callSites.push(callExpr);
+                    }
+                }
+
+                // ── Case 2: alias assignment  ─────────────────────────────────
+                // e.g.  const x = func;
+                //        let x = func;
+                //        var x = func;   (initializer, not a call)
+                // The reference appears as the initializer of a VariableDeclaration.
+                const varDecl = refNode.getParent();
+                if (varDecl && varDecl.getKind() === SyntaxKind.VariableDeclaration) {
+                    const vd = varDecl.asKindOrThrow(SyntaxKind.VariableDeclaration);
+                    const initializer = vd.getInitializer();
+
+                    // Make sure the reference IS the initializer (rhs), not the name (lhs)
+                    if (initializer && initializer.getStart() === refNode.getStart()) {
+                        const aliasSym = vd.getNameNode().getSymbol();
+                        if (aliasSym && !aliasedSymbols.has(aliasSym)) {
+                            aliasedSymbols.add(aliasSym);
+                            changed = true; // trigger another pass to catch x() calls
+                            console.log(
+                                `[alias] '${vd.getName()}' is an alias for '${fn.getName?.() ?? "<anon>"}' ` +
+                                `in ${vd.getSourceFile().getBaseName()}`
+                            );
+                        }
+                    }
+                }
+
+                // ── Case 3: alias via assignment expression  ──────────────────
+                // e.g.  x = func;   (already-declared variable re-assigned)
+                const binaryExpr = refNode.getParent();
+                if (
+                    binaryExpr &&
+                    binaryExpr.getKind() === SyntaxKind.BinaryExpression
+                ) {
+                    const bin = binaryExpr.asKindOrThrow(SyntaxKind.BinaryExpression);
+                    const isAssign =
+                        bin.getOperatorToken().getKind() === SyntaxKind.EqualsToken;
+                    const rhs = bin.getRight();
+
+                    if (isAssign && rhs.getStart() === refNode.getStart()) {
+                        const lhs = bin.getLeft();
+                        if (lhs.isKind(SyntaxKind.Identifier)) {
+                            const lhsSym = lhs.getSymbol();
+                            if (lhsSym && !aliasedSymbols.has(lhsSym)) {
+                                aliasedSymbols.add(lhsSym);
+                                changed = true;
+                                console.log(
+                                    `[alias/assign] '${lhs.getText()}' assigned from '${fn.getName?.() ?? "<anon>"}' ` +
+                                    `in ${bin.getSourceFile().getBaseName()}`
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return callSites;
+}
+
 (async () => {
     const sourceDir = "examples/unsec";
     const targetDir = "examples/gen";
@@ -492,7 +621,10 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
 
                 const reqRaw = requiresRoleTag.getComment();
                 const roleType = (typeof reqRaw === "string" ? reqRaw.trim() : requiresRoleTag.getCommentText()?.trim()) ?? classNames[0];
-                const references = fn.findReferencesAsNodes();
+
+                // ── Collect call sites (direct, method, AND aliased) ──────────
+                const allCallSites = collectCallSitesForFn(fn);
+
                 fn.addParameter({
                     name: "roleContext",
                     type: roleType,
@@ -502,46 +634,45 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                     .flatMap(doc => doc.getTags())
                     .find(tag => tag.getTagName() === "becomesRole")
 
-                for (const reference of references) {
-                    // The reference is a symbol usage node (Identifier, etc.)
+                // Sort in reverse source order before mutating to keep positions stable
+                allCallSites.sort((a, b) => b.getStart() - a.getStart());
 
-                    const callExpression = reference.getFirstAncestorByKind(SyntaxKind.CallExpression);
-                    if (!callExpression) continue;
+                for (const callExpression of allCallSites) {
+                    // ── Inject roleContext argument ───────────────────────────
+                    // Determine which roleContext name is live at this call site by
+                    // checking whether a becomesRole var has been inserted above.
+                    // Walk up to the enclosing block and look for the most-recently-
+                    // declared roleContextBecome_N / roleContextRaised_N above this call.
+                    let activeRoleContextName = "roleContext";
 
-                    const expr = callExpression.getExpression();
-
-                    // Case 1: direct call like foo(...)
-                    if (expr.isKind(SyntaxKind.Identifier)) {
-                        const refSymbol = reference.getSymbol();
-                        const exprSymbol = expr.getSymbol();
-
-                        if (!refSymbol || !exprSymbol) continue;
-
-                        if (refSymbol !== exprSymbol) continue;
-
-                        console.log(
-                            `Found call in file: ${callExpression.getSourceFile().getFilePath()} ` +
-                            `at line ${callExpression.getStartLineNumber()} ` +
-                            `with full text ${callExpression.getFullText()}`
-                        );
-
-                        callExpression.addArgument("roleContext");
+                    let enclosingBlock: import("ts-morph").Node | undefined = callExpression.getParent();
+                    while (enclosingBlock && enclosingBlock.getKind() !== SyntaxKind.Block) {
+                        enclosingBlock = enclosingBlock.getParent();
                     }
-                    if (expr.isKind(SyntaxKind.PropertyAccessExpression)) {
-                        const refSymbol = reference.getSymbol();
-                        const nameSymbol = expr.getNameNode().getSymbol();
-
-                        if (!refSymbol || !nameSymbol) continue;
-                        if (refSymbol !== nameSymbol) continue;
-
-                        console.log(
-                            `Found method call in file: ${callExpression.getSourceFile().getFilePath()} ` +
-                            `at line ${callExpression.getStartLineNumber()} ` +
-                            `with full text ${callExpression.getFullText()}`
-                        );
-
-                        callExpression.addArgument("roleContext");
+                    if (enclosingBlock) {
+                        const block = enclosingBlock.asKindOrThrow(SyntaxKind.Block);
+                        const callStart = callExpression.getStart();
+                        // Find the last roleContextBecome_N or roleContextRaised_N declared before this call
+                        for (const stmt of block.getStatements()) {
+                            if (stmt.getStart() >= callStart) break;
+                            const text = stmt.getText().trim();
+                            const m = text.match(/^const (roleContext(?:Become|Raised)_\d+)/);
+                            if (m) activeRoleContextName = m[1];
+                        }
                     }
+
+                    // Only add argument if not already present
+                    const alreadyInjected = callExpression.getArguments()
+                        .some(a => /^roleContext/.test(a.getText()));
+                    if (!alreadyInjected) {
+                        callExpression.addArgument(activeRoleContextName);
+                        console.log(
+                            `[inject] Added '${activeRoleContextName}' to call at line ` +
+                            `${callExpression.getStartLineNumber()} in ` +
+                            `${callExpression.getSourceFile().getBaseName()}`
+                        );
+                    }
+
                     if (becomesTag && callExpression) {
                         const raw = becomesTag.getComment()
                         const becomesType = (typeof raw === "string" ? raw : becomesTag.getCommentText() ?? "").trim()
@@ -576,8 +707,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                         }
                     }
                 }
-
-
             }
         });
 
