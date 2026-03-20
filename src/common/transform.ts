@@ -106,7 +106,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 
 		// ensure roles import exists; if not present add import at top
 		if (!/from\s+['"]\.\/roles\.generated['"]/.test(src) && !/from\s+['"]roles\.generated['"]/.test(src)) {
-			ms.prepend(`import { RoleToken, mkRole, requireRole, defaultRole, Role } from "./roles.generated";\n`);
+			ms.prepend(`import { _TYSAST_ROLE_TOKEN, _TYSAST_MAKE_ROLE, requireRole, _TYSAST_DEFAULT_ROLE, _TYSAST_ROLE } from "./roles.generated";\n`);
 		}
 
 		// Collect function/method declarations in this file for local changes
@@ -135,7 +135,9 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 					// insert parameter text just before the close-paren
 					const closeParen = node.getChildren().find(ch => ch.kind === ts.SyntaxKind.CloseParenToken);
 					const insertionPos = closeParen ? closeParen.getStart() : node.getEnd();
-					const paramText = requiredRole ? `roleContext: RoleToken<"${requiredRole}">` : `roleContext: RoleToken<Role> = mkRole(defaultRole as Role)`;
+					const paramText = requiredRole
+						? `roleContext: _TYSAST_ROLE_TOKEN<"${requiredRole}">`
+						: `roleContext: _TYSAST_ROLE_TOKEN<_TYSAST_ROLE> = _TYSAST_MAKE_ROLE(_TYSAST_DEFAULT_ROLE as _TYSAST_ROLE)`;
 					// if there are any parameters already, prepend ", "
 					const hasParams = params && params.length > 0;
 					const insertion = (hasParams ? `, ${paramText}` : paramText);
@@ -147,7 +149,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 					const body = (node as any).body as ts.Block | undefined;
 					if (body) {
 						// place return type annotation right before body
-						ms.appendLeft(body.getStart(), `: RoleToken<"${becomesRole}"> `);
+						ms.appendLeft(body.getStart(), `: _TYSAST_ROLE_TOKEN<"${becomesRole}"> `);
 
 						// replace trivial return expressions inside the body
 						function replaceReturns(n: ts.Node) {
@@ -155,11 +157,11 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 								if (n.expression) {
 									const exprText = n.expression.getFullText(sf).trim();
 									if (exprText === "true" || exprText === "false" || exprText === "null" || exprText === "undefined") {
-										ms.overwrite(n.expression.getStart(), n.expression.getEnd(), `mkRole("${becomesRole}")`);
+										ms.overwrite(n.expression.getStart(), n.expression.getEnd(), `_TYSAST_MAKE_ROLE("${becomesRole}")`);
 									}
 								} else {
 									// bare return -> replace whole return
-									ms.overwrite(n.getStart(), n.getEnd(), `return mkRole("${becomesRole}");`);
+									ms.overwrite(n.getStart(), n.getEnd(), `return _TYSAST_MAKE_ROLE("${becomesRole}");`);
 								}
 							}
 							ts.forEachChild(n, replaceReturns);
@@ -168,7 +170,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 
 						// if no return found, append one before closing brace
 						if (!/return\b/.test(body.getFullText(sf))) {
-							ms.appendLeft(body.getEnd() - 1, `\n  return mkRole("${becomesRole}");\n`);
+							ms.appendLeft(body.getEnd() - 1, `\n  return _TYSAST_MAKE_ROLE("${becomesRole}");\n`);
 						}
 					}
 				}
@@ -272,7 +274,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 					if (raised) {
 						if (!knownRoles.has(raised)) throw new Error(`Role "${raised}" used in @raised comment in ${filePath} but not present in roleConfig`);
 						// insert const declaration before this statement
-						const declText = `const roleContextRaised: RoleToken<"${raised}"> = mkRole("${raised}");\n`;
+						const declText = `const roleContextRaised: _TYSAST_ROLE_TOKEN<"${raised}"> = _TYSAST_MAKE_ROLE("${raised}");\n`;
 						ms.appendLeft(node.getStart(), declText);
 						// alter the call: find the argument that is a call to requireRole and replace it
 						const args = expr.arguments;
