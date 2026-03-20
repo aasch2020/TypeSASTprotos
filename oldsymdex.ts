@@ -1,9 +1,10 @@
-import { CallExpression, FunctionDeclaration, JSDoc, MethodDeclaration, ParameterDeclaration, Project, Scope, ScriptTarget, SyntaxKind, ts, VariableDeclarationKind } from "ts-morph";
+import { CallExpression, FunctionDeclaration, MethodDeclaration, Project, Scope, ScriptTarget, SyntaxKind, ts, VariableDeclarationKind } from "ts-morph";
 import { cp } from "fs/promises";
 import * as path from "path";
 import fs from "fs";
 import { execSync } from "child_process";
-import { buildCallIndex, reverseTrace, reverseTraceUntilRole } from "./src/bt"
+import { reverseTrace, reverseTraceUntilRole } from "./src/bt"
+
 export function makeSymexDriver(
     project: Project,
     funcName: string,
@@ -14,7 +15,6 @@ export function makeSymexDriver(
 
     const func = sourceFile.getFunction(funcName);
     if (!func) throw new Error(`Function ${funcName} not found in ${tsFile}`);
-    console.log(funcName + "driver gen")
 
     const jsModule = "./" + path.basename(tsFile, ".ts");
 
@@ -38,7 +38,6 @@ export function makeSymexDriver(
             });
             return `{ ${fields.join(", ")} }`;
         }
-        // fallback for unknown types
         return `S$.symbol("${path}", "")`;
     }
 
@@ -57,44 +56,21 @@ export function makeSymexDriver(
     const driverCode = `function verify() {\n  ${lines.join("\n  ")}\n}\nverify();\n`;
 
     fs.writeFileSync(outFile, driverCode, "utf-8");
-    console.log(`Written symbolic driver to ${outFile}`);
-}
-function insertStateRaiseSimple(filePath: string) {
-    let code = fs.readFileSync(filePath, "utf-8");
-
-    // Match lines with @raised <role>
-    const regex = /\/\*\*\s*@raised\s+([a-zA-Z0-9_-]+)\s*\*\//g;
-
-    code = code.replace(regex, (x, role) => {
-        console.log(x, role)
-        // Replace the @raised comment with the state.raise call
-        return `${x} \n void 0;`;
-    });
-
-    fs.writeFileSync(filePath, code);
 }
 
 function anchorhack(filePath: string) {
     let code = fs.readFileSync(filePath, "utf-8");
-
-    // Match lines with @raised <role>
     const regex = /\/\*\*\s*@raised\s+([a-zA-Z0-9_-]+)\s*\*\//g;
-
-    code = code.replace(regex, (x, role) => {
-        console.log(x, role)
-        // Replace the @raised comment with the state.raise call
-        return `${x} \n void 0;`;
-    });
-
+    code = code.replace(regex, (x, _role) => `${x} \n void 0;`);
     fs.writeFileSync(filePath, code);
 }
+
 function findJsDocWithRaised(project: Project) {
     type RaisedEntry = { node: import("ts-morph").Node; roleName: string };
     const out: RaisedEntry[] = [];
 
     for (const sf of project.getSourceFiles()) {
         sf.forEachDescendant((node) => {
-
             const getJsDocs = (node as {
                 getJsDocs?: () => {
                     getTags: () => {
@@ -117,23 +93,9 @@ function findJsDocWithRaised(project: Project) {
             if (!raisedTag) return;
 
             const raw = raisedTag.getComment();
-            const roleName =
-                (typeof raw === "string"
-                    ? raw
-                    : raisedTag.getCommentText() ?? ""
-                ).trim();
+            const roleName = (typeof raw === "string" ? raw : raisedTag.getCommentText() ?? "").trim();
 
             if (!roleName) return;
-            const parent = node.getParent();
-
-            // only insert inside blocks (functions, methods, etc.)
-            if (parent && parent.getKindName() === "Block") {
-                const block = parent.asKindOrThrow(SyntaxKind.Block);
-
-                // find safe insertion point: first statement in block
-                const stmts = block.getStatements();
-
-            }
 
             out.push({ node, roleName });
         });
@@ -141,14 +103,15 @@ function findJsDocWithRaised(project: Project) {
 
     return out;
 }
+
 function makeForSymex(targetDir: string, roles: string[], entryPoints: string[], entryFiles: string[]) {
+    console.log("[symex] Building state machine...");
     const project = new Project({
         compilerOptions: {
             target: ScriptTarget.ES2024,
-            module: 1, // ESNext
+            module: 1,
         },
     });
-
 
     const allFiles = project.addSourceFilesAtPaths(path.join(targetDir, "*.ts"));
 
@@ -157,7 +120,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
         "",
         { overwrite: true }
     );
-
 
     const cls = stateFile.addClass({
         name: "AnalysisState",
@@ -194,7 +156,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
         });
     }
 
-
     for (let i = 0; i < roles.length; i++) {
         const role = roles[i];
         const allowedRoles = roles.slice(i);
@@ -209,32 +170,24 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
         });
     }
 
-
     stateFile.addVariableStatement({
         declarationKind: VariableDeclarationKind.Const,
         isExported: true,
         declarations: [{ name: "state", initializer: "new AnalysisState()" }]
     });
 
-
     for (const file of allFiles) {
-        // skip state.ts itself
         if (file.getBaseName() === "state.ts") continue;
-
         const hasImport = file.getImportDeclarations().some(id => id.getModuleSpecifierValue() === "./state");
         if (!hasImport) {
-            console.log("Adding import to:", file.getBaseName());
             file.insertStatements(0, `import { state } from "./state";`);
         }
         file.saveSync();
     }
 
-
+    console.log("[symex] Instrumenting files...");
     for (const sourceFile of project.getSourceFiles()) {
-
-        // Visit all functions and methods
         sourceFile.forEachDescendant((node) => {
-
             if (
                 node.getKind() === SyntaxKind.FunctionDeclaration ||
                 node.getKind() === SyntaxKind.MethodDeclaration
@@ -245,35 +198,30 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                         : SyntaxKind.MethodDeclaration
                 );
 
-                // Check for @requiresRole annotation
                 const jsDocs = fn.getJsDocs();
                 const requiresRoleTag = jsDocs
                     .flatMap(doc => doc.getTags())
                     .find(tag => tag.getTagName() === "requiresRole");
 
-                if (!requiresRoleTag) return; // nothing to do if no @requiresRole
+                if (!requiresRoleTag) return;
 
                 const reqRaw = requiresRoleTag.getComment();
                 const roleType = (typeof reqRaw === "string"
                     ? reqRaw.trim()
                     : requiresRoleTag.getCommentText()?.trim()) ?? "unauth";
 
-                // Insert call to state.require<Role>() at the start of the function body
-                let body = fn.getBodyText();
-                fn.insertStatements(0, `state.require${roleType[0].toUpperCase() + roleType.slice(1)}();`)
+                fn.insertStatements(0, `state.require${roleType[0].toUpperCase() + roleType.slice(1)}();`);
+
                 const becomesTag = jsDocs
                     .flatMap(doc => doc.getTags())
                     .find(tag => tag.getTagName() === "becomesRole");
 
                 if (becomesTag) {
                     const raw = becomesTag.getComment();
-                    const becomesRole = (typeof raw === "string"
-                        ? raw.trim()
-                        : becomesTag.getCommentText()?.trim()) ?? "";
+                    const becomesRole = (typeof raw === "string" ? raw.trim() : becomesTag.getCommentText()?.trim()) ?? "";
 
                     if (becomesRole) {
                         const references = fn.findReferencesAsNodes();
-
                         const callSites: CallExpression[] = [];
 
                         for (const reference of references) {
@@ -296,7 +244,6 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                             if (isMatch) callSites.push(callExpression);
                         }
 
-
                         callSites.sort((a, b) => b.getStart() - a.getStart());
 
                         for (const callExpression of callSites) {
@@ -318,37 +265,20 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
                             const idx = statements.findIndex(s => s.getStart() === stmtNode!.getStart());
                             if (idx < 0) continue;
 
-                            // Insert state.raise("<becomesRole>") immediately after the call statement
                             block.insertStatements(idx + 1, `state.raise("${becomesRole}");`);
-
-                            console.log(
-                                `[becomesRole/symex] Inserted state.raise("${becomesRole}") ` +
-                                `after call at line ${callExpression.getStartLineNumber()} ` +
-                                `in ${callExpression.getSourceFile().getBaseName()}`
-                            );
                         }
                     }
                 }
             }
         });
-        const originalPath = sourceFile.getFilePath();
         sourceFile.saveSync();
-        console.log(`Saved annotated file: ${originalPath}`);
     }
 
-
-    let jsDocWithRaised = findJsDocWithRaised(project);
-    for (const { node, roleName } of jsDocWithRaised) {
-        const sf = node.getSourceFile();
-        const line = node.getStartLineNumber();
-        console.log(`${path.basename(sf.getFilePath())}:${line} ${node.getKindName()} @raised ${roleName}`);
-    }
-
-
+    console.log("[symex] Processing @raised tags...");
+    const jsDocWithRaised = findJsDocWithRaised(project);
     const sortedRaised = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
 
     for (const { node, roleName } of sortedRaised) {
-        // Walk up to find the parent Block
         let blockNode = node.getParent();
         while (blockNode && blockNode.getKind() !== SyntaxKind.Block) {
             blockNode = blockNode.getParent();
@@ -357,43 +287,26 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
 
         const block = blockNode.asKindOrThrow(SyntaxKind.Block);
         const statements = block.getStatements();
-
-        // Find the `void 0;` placeholder that findJsDocWithRaised inserted
         const idx = statements.findIndex(s => s.getStart() === node.getStart());
         if (idx < 0) continue;
 
-        // Replace placeholder with state.raise call — same mechanism as the main
-        // flow's `const roleContextRaised_N` replacement, but using state.raise
-        // since makeForSymex operates on the runtime state machine, not type vars.
         statements[idx].replaceWithText(`state.raise("${roleName}");`);
-
-        console.log(`[raised/symex] Replaced void 0 with state.raise("${roleName}") at idx ${idx} in ${node.getSourceFile().getBaseName()}`);
     }
 
     project.saveSync();
 
-    console.log("All TS files instrumented. Compiling to JS...");
+    console.log("[symex] Generating drivers and compiling...");
     for (let i = 0; i < entryPoints.length; i++) {
-        makeSymexDriver(project, entryPoints[i], path.join(targetDir, entryFiles[i]), path.join(targetDir, `driver_${i}.js`))
+        makeSymexDriver(project, entryPoints[i], path.join(targetDir, entryFiles[i]), path.join(targetDir, `driver_${i}.js`));
     }
     try {
-        // Assumes a tsconfig.json exists in the targetDir
         execSync(`tsc --project ${targetDir}/tsconfig.json`, { stdio: "inherit" });
-        console.log("Compilation finished. JS output generated.");
+        console.log("[symex] Compilation finished.");
     } catch (err) {
-        console.error("TypeScript compilation failed:", err);
+        console.error("[symex] TypeScript compilation failed:", err);
     }
-
-
 }
 
-/**
- * Given a function/method node, collect all CallExpression nodes that invoke it,
- * including indirect calls through variable aliases like:
- *   const x = func;
- *   x();               // <-- this must be caught
- *   let y = x; y();   // <-- transitive aliases also caught
- */
 function collectCallSitesForFn(
     fn: FunctionDeclaration | MethodDeclaration
 ): CallExpression[] {
@@ -401,20 +314,13 @@ function collectCallSitesForFn(
     const fnSymbol = fn.getSymbol();
     if (!fnSymbol) return callSites;
 
-    // Track all symbols that are known aliases for this function.
-    // Seed with the function's own symbol.
     const aliasedSymbols = new Set<import("ts-morph").Symbol>([fnSymbol]);
 
-    // We iterate to a fixed point: as we discover new alias symbols we scan
-    // all references again to find further aliases.
     let changed = true;
     while (changed) {
         changed = false;
 
         for (const sym of [...aliasedSymbols]) {
-            // findReferencesAsNodes() only exists on specific narrowed node types,
-            // not the base Node. Walk declarations and find one that supports it,
-            // falling back to the name-node (Identifier) which always has it.
             const decls = sym.getDeclarations();
             if (!decls.length) continue;
 
@@ -425,8 +331,6 @@ function collectCallSitesForFn(
                     refNodes = asAny.findReferencesAsNodes() as import("ts-morph").Node[];
                     break;
                 }
-                // VariableDeclaration / BindingElement etc. expose the method on
-                // their name node (an Identifier), which always has it.
                 const nameNode = asAny.getNameNode?.();
                 if (nameNode && typeof (nameNode as any).findReferencesAsNodes === "function") {
                     refNodes = (nameNode as any).findReferencesAsNodes() as import("ts-morph").Node[];
@@ -436,9 +340,7 @@ function collectCallSitesForFn(
             if (!refNodes) continue;
 
             for (const refNode of refNodes) {
-
-                // ── Case 1: direct or method call  ───────────────────────────
-                // e.g. func(...)  or  obj.func(...)
+                // ── Case 1: direct or method call ────────────────────────────
                 const callExpr = refNode.getFirstAncestorByKind(SyntaxKind.CallExpression);
                 if (callExpr) {
                     const expr = callExpr.getExpression();
@@ -457,40 +359,26 @@ function collectCallSitesForFn(
                     }
                 }
 
-                // ── Case 2: alias assignment  ─────────────────────────────────
-                // e.g.  const x = func;
-                //        let x = func;
-                //        var x = func;   (initializer, not a call)
-                // The reference appears as the initializer of a VariableDeclaration.
+                // ── Case 2: alias assignment ──────────────────────────────────
                 const varDecl = refNode.getParent();
                 if (varDecl && varDecl.getKind() === SyntaxKind.VariableDeclaration) {
                     const vd = varDecl.asKindOrThrow(SyntaxKind.VariableDeclaration);
                     const initializer = vd.getInitializer();
 
-                    // Make sure the reference IS the initializer (rhs), not the name (lhs)
                     if (initializer && initializer.getStart() === refNode.getStart()) {
                         const aliasSym = vd.getNameNode().getSymbol();
                         if (aliasSym && !aliasedSymbols.has(aliasSym)) {
                             aliasedSymbols.add(aliasSym);
-                            changed = true; // trigger another pass to catch x() calls
-                            console.log(
-                                `[alias] '${vd.getName()}' is an alias for '${fn.getName?.() ?? "<anon>"}' ` +
-                                `in ${vd.getSourceFile().getBaseName()}`
-                            );
+                            changed = true;
                         }
                     }
                 }
 
-                // ── Case 3: alias via assignment expression  ──────────────────
-                // e.g.  x = func;   (already-declared variable re-assigned)
+                // ── Case 3: alias via assignment expression ───────────────────
                 const binaryExpr = refNode.getParent();
-                if (
-                    binaryExpr &&
-                    binaryExpr.getKind() === SyntaxKind.BinaryExpression
-                ) {
+                if (binaryExpr && binaryExpr.getKind() === SyntaxKind.BinaryExpression) {
                     const bin = binaryExpr.asKindOrThrow(SyntaxKind.BinaryExpression);
-                    const isAssign =
-                        bin.getOperatorToken().getKind() === SyntaxKind.EqualsToken;
+                    const isAssign = bin.getOperatorToken().getKind() === SyntaxKind.EqualsToken;
                     const rhs = bin.getRight();
 
                     if (isAssign && rhs.getStart() === refNode.getStart()) {
@@ -500,10 +388,6 @@ function collectCallSitesForFn(
                             if (lhsSym && !aliasedSymbols.has(lhsSym)) {
                                 aliasedSymbols.add(lhsSym);
                                 changed = true;
-                                console.log(
-                                    `[alias/assign] '${lhs.getText()}' assigned from '${fn.getName?.() ?? "<anon>"}' ` +
-                                    `in ${bin.getSourceFile().getBaseName()}`
-                                );
                             }
                         }
                     }
@@ -516,25 +400,28 @@ function collectCallSitesForFn(
 }
 
 (async () => {
-    const sourceDir = "examples/unsec";
-    const targetDir = "examples/gen";
-    const jsverSymdir = "examples/gen3"
-    await cp(sourceDir, jsverSymdir, { recursive: true });
-    console.log(`Copied ${sourceDir} to ${jsverSymdir}`);
+    const sourceDir = process.argv[2];
+    if (!sourceDir) throw new Error("Usage: ts-node index.ts <source-dir>");
 
+    const baseName = path.basename(sourceDir.replace(/\/+$/, ""));
+    const parentDir = path.dirname(sourceDir.replace(/\/+$/, ""));
+    const targetDir = path.join(parentDir, baseName + "_secgen");
+    const jsverSymdir = path.join(parentDir, baseName + "_symex");
+
+    console.log("[setup] Copying source directories...");
+    await cp(sourceDir, jsverSymdir, { recursive: true });
     await cp(sourceDir, targetDir, { recursive: true });
-    console.log(`Copied ${sourceDir} to ${targetDir}`);
-    for (const dir of [targetDir, jsverSymdir]) { // this is stupid and dumb but needed
+
+    console.log("[setup] Running anchor hack...");
+    for (const dir of [targetDir, jsverSymdir]) {
         for (const file of fs.readdirSync(dir)) {
             if (!file.endsWith(".ts")) continue;
-
             anchorhack(`${dir}/${file}`);
         }
     }
+
     const project = new Project({
-        compilerOptions: {
-            target: ScriptTarget.ES2024
-        },
+        compilerOptions: { target: ScriptTarget.ES2024 },
     });
 
     project.addSourceFilesAtPaths(`${targetDir}/*.ts`);
@@ -543,50 +430,30 @@ function collectCallSitesForFn(
     const roleType = sourceFile.getFunction("roles");
     if (!roleType) throw new Error("Role type not found");
 
-    // Parse JSDoc hierarchy
     const jsDoc = roleType.getJsDocs();
     if (!jsDoc) throw new Error("Role type has no JSDoc");
 
     const rolesTag = jsDoc[0].getTags().find(tag => tag.getTagName() === "roles");
     if (!rolesTag) throw new Error("@roles tag not found");
 
-    const rolesLine = rolesTag.getCommentText(); // "0 < user < admin"
-
+    const rolesLine = rolesTag.getCommentText();
     const classNames = rolesLine!.split("<").map(s => s.trim());
-
-    console.log(classNames);
+    console.log("[setup] Roles:", classNames);
 
     for (let i = 0; i < classNames.length; i++) {
         const clsName = classNames[i];
         const parentName = i > 0 ? classNames[i - 1] : undefined;
-
-        const cls = sourceFile.addClass({
-            name: clsName,
-            isExported: true,
-            extends: parentName,
-        });
-
-        cls.addMethod({
-            name: `c${clsName}`,
-            returnType: "void",
-        });
+        const cls = sourceFile.addClass({ name: clsName, isExported: true, extends: parentName });
+        cls.addMethod({ name: `c${clsName}`, returnType: "void" });
     }
-    console.log(project.getSourceFiles().map(p => p.getBaseName()))
 
-    // Helper: find all JSDoc with @raised (any JSDocable node)
-
-
+    console.log("[static] Injecting role parameters and call sites...");
     for (const sourceFile of project.getSourceFiles()) {
         if (sourceFile.getBaseName() !== "roles.ts") {
-            sourceFile.insertStatements(
-                0,
-                `import { ${classNames.join(", ")} } from "./roles";`
-            );
+            sourceFile.insertStatements(0, `import { ${classNames.join(", ")} } from "./roles";`);
         }
-        // Find all function declarations
-        sourceFile.forEachDescendant((node) => {
-            // console.log("start")
 
+        sourceFile.forEachDescendant((node) => {
             if (
                 node.getKind() === SyntaxKind.FunctionDeclaration ||
                 node.getKind() === SyntaxKind.MethodDeclaration
@@ -597,52 +464,89 @@ function collectCallSitesForFn(
                         : SyntaxKind.MethodDeclaration
                 );
 
-
-                // Skip if already has role argument
                 if (fn.getParameters().some(p => p.getName() === "roleContext")) return;
-                // console.log("test")
-                // Check for @requiresRole annotation
+
                 const jsDocs = fn.getJsDocs();
                 const requiresRoleTag = jsDocs
                     .flatMap(doc => doc.getTags())
                     .find(tag => tag.getTagName() === "requiresRole");
-                // console.log(jsDocs)
+
                 if (!requiresRoleTag) {
-
-                    fn.addParameter({
-                        name: "roleContext",
-                        type: classNames[0],
-                        initializer: "new " + classNames[0]
-                    });
-                    return
+                    fn.addParameter({ name: "roleContext", type: classNames[0], initializer: "new " + classNames[0] });
+                    return;
                 }
-
-
 
                 const reqRaw = requiresRoleTag.getComment();
                 const roleType = (typeof reqRaw === "string" ? reqRaw.trim() : requiresRoleTag.getCommentText()?.trim()) ?? classNames[0];
 
-                // ── Collect call sites (direct, method, AND aliased) ──────────
                 const allCallSites = collectCallSitesForFn(fn);
+                const callbackWraps: { parentCall: CallExpression; argIdx: number; wrapper: string; }[] = [];
 
-                fn.addParameter({
-                    name: "roleContext",
-                    type: roleType,
-                    hasQuestionToken: true,
-                });
+                fn.addParameter({ name: "roleContext", type: roleType, hasQuestionToken: false });
+
                 const becomesTag = jsDocs
                     .flatMap(doc => doc.getTags())
-                    .find(tag => tag.getTagName() === "becomesRole")
+                    .find(tag => tag.getTagName() === "becomesRole");
 
-                // Sort in reverse source order before mutating to keep positions stable
+                const fnSymbol = fn.getSymbol();
+                if (fnSymbol) {
+                    const decls = fnSymbol.getDeclarations();
+                    for (const decl of decls) {
+                        const asAny = decl as any;
+                        let refNodes: import("ts-morph").Node[] | undefined;
+
+                        if (typeof asAny.findReferencesAsNodes === "function") {
+                            refNodes = asAny.findReferencesAsNodes() as import("ts-morph").Node[];
+                        } else {
+                            const nameNode = asAny.getNameNode?.();
+                            if (nameNode && typeof (nameNode as any).findReferencesAsNodes === "function") {
+                                refNodes = (nameNode as any).findReferencesAsNodes() as import("ts-morph").Node[];
+                            }
+                        }
+                        if (!refNodes) continue;
+
+                        for (const refNode of refNodes) {
+                            const parentNode = refNode.getParent();
+                            if (parentNode && parentNode.getKind() === SyntaxKind.CallExpression) {
+                                const parentCall = parentNode.asKindOrThrow(SyntaxKind.CallExpression);
+                                const args = parentCall.getArguments();
+                                const argIdx = args.findIndex(a => a.getStart() === refNode.getStart());
+
+                                if (argIdx >= 0) {
+                                    let activeRoleContextName = "roleContext";
+
+                                    let enclosingBlock: import("ts-morph").Node | undefined = parentCall.getParent();
+                                    while (enclosingBlock && enclosingBlock.getKind() !== SyntaxKind.Block) {
+                                        enclosingBlock = enclosingBlock.getParent();
+                                    }
+                                    if (enclosingBlock) {
+                                        const block = enclosingBlock.asKindOrThrow(SyntaxKind.Block);
+                                        const callStart = parentCall.getStart();
+                                        for (const stmt of block.getStatements()) {
+                                            if (stmt.getStart() >= callStart) break;
+                                            const m = stmt.getText().trim().match(/^const (roleContext(?:Become|Raised)_\d+)/);
+                                            if (m) activeRoleContextName = m[1];
+                                        }
+                                    }
+
+                                    const fnName = refNode.getText();
+                                    const fnParams = fn.getParameters().filter(p => p.getName() !== "roleContext");
+                                    const paramList = fnParams.map(p => `${p.getName()}: ${p.getType().getText()}`).join(", ");
+                                    const argList = fnParams.map(p => p.getName()).join(", ");
+                                    const wrapper = argList.length > 0
+                                        ? `(${paramList}) => ${fnName}(${argList}, ${activeRoleContextName})`
+                                        : `() => ${fnName}(${activeRoleContextName})`;
+
+                                    callbackWraps.push({ parentCall, argIdx, wrapper });
+                                }
+                            }
+                        }
+                    }
+                }
+
                 allCallSites.sort((a, b) => b.getStart() - a.getStart());
 
                 for (const callExpression of allCallSites) {
-                    // ── Inject roleContext argument ───────────────────────────
-                    // Determine which roleContext name is live at this call site by
-                    // checking whether a becomesRole var has been inserted above.
-                    // Walk up to the enclosing block and look for the most-recently-
-                    // declared roleContextBecome_N / roleContextRaised_N above this call.
                     let activeRoleContextName = "roleContext";
 
                     let enclosingBlock: import("ts-morph").Node | undefined = callExpression.getParent();
@@ -652,100 +556,66 @@ function collectCallSitesForFn(
                     if (enclosingBlock) {
                         const block = enclosingBlock.asKindOrThrow(SyntaxKind.Block);
                         const callStart = callExpression.getStart();
-                        // Find the last roleContextBecome_N or roleContextRaised_N declared before this call
                         for (const stmt of block.getStatements()) {
                             if (stmt.getStart() >= callStart) break;
-                            const text = stmt.getText().trim();
-                            const m = text.match(/^const (roleContext(?:Become|Raised)_\d+)/);
+                            const m = stmt.getText().trim().match(/^const (roleContext(?:Become|Raised)_\d+)/);
                             if (m) activeRoleContextName = m[1];
                         }
                     }
 
-                    // Only add argument if not already present
-                    const alreadyInjected = callExpression.getArguments()
-                        .some(a => /^roleContext/.test(a.getText()));
+                    const alreadyInjected = callExpression.getArguments().some(a => /^roleContext/.test(a.getText()));
                     if (!alreadyInjected) {
                         callExpression.addArgument(activeRoleContextName);
-                        console.log(
-                            `[inject] Added '${activeRoleContextName}' to call at line ` +
-                            `${callExpression.getStartLineNumber()} in ` +
-                            `${callExpression.getSourceFile().getBaseName()}`
-                        );
                     }
 
                     if (becomesTag && callExpression) {
-                        const raw = becomesTag.getComment()
-                        const becomesType = (typeof raw === "string" ? raw : becomesTag.getCommentText() ?? "").trim()
+                        const raw = becomesTag.getComment();
+                        const becomesType = (typeof raw === "string" ? raw : becomesTag.getCommentText() ?? "").trim();
 
-                        let stmtNode = callExpression.getParent()
+                        let stmtNode = callExpression.getParent();
                         while (stmtNode && stmtNode.getKind() !== SyntaxKind.ExpressionStatement && stmtNode.getKind() !== SyntaxKind.VariableStatement) {
-                            stmtNode = stmtNode.getParent()
+                            stmtNode = stmtNode.getParent();
                         }
-                        if (!stmtNode) continue
+                        if (!stmtNode) continue;
 
-                        const blockNode = stmtNode.getParent()
-                        if (!blockNode || blockNode.getKind() !== SyntaxKind.Block) continue
+                        const blockNode = stmtNode.getParent();
+                        if (!blockNode || blockNode.getKind() !== SyntaxKind.Block) continue;
 
-                        const block = blockNode.asKindOrThrow(SyntaxKind.Block)
-                        const statements = block.getStatements()
-                        const idx = statements.findIndex(s => s.getStart() === stmtNode!.getStart())
-                        if (idx < 0) continue
+                        const block = blockNode.asKindOrThrow(SyntaxKind.Block);
+                        const statements = block.getStatements();
+                        const idx = statements.findIndex(s => s.getStart() === stmtNode!.getStart());
+                        if (idx < 0) continue;
 
-                        const varName = `roleContextBecome_${idx}`
-                        console.log(`[becomesRole] varName=${varName}`)
+                        const varName = `roleContextBecome_${idx}`;
+                        block.insertStatements(idx + 1, `const ${varName}: ${becomesType} = new ${becomesType}();`);
 
-                        block.insertStatements(idx + 1, `const ${varName}: ${becomesType} = new ${becomesType}();`)
-
-                        const affectedStatements = block.getStatements().slice(idx + 2)
+                        const affectedStatements = block.getStatements().slice(idx + 2);
                         for (const stmt of affectedStatements) {
                             stmt.forEachDescendant(desc => {
-                                if (desc.getKind() !== SyntaxKind.CallExpression) return
-                                const call = desc as CallExpression
-                                const roleArgIdx = call.getArguments().findIndex(a => a.getText() === "roleContext")
-                                if (roleArgIdx >= 0) call.getArguments()[roleArgIdx].replaceWithText(varName)
-                            })
+                                if (desc.getKind() !== SyntaxKind.CallExpression) return;
+                                const call = desc as CallExpression;
+                                const roleArgIdx = call.getArguments().findIndex(a => a.getText() === "roleContext");
+                                if (roleArgIdx >= 0) call.getArguments()[roleArgIdx].replaceWithText(varName);
+                            });
                         }
                     }
+                }
+
+                callbackWraps.sort((a, b) => b.parentCall.getStart() - a.parentCall.getStart());
+                for (const { parentCall, argIdx, wrapper } of callbackWraps) {
+                    parentCall.getArguments()[argIdx].replaceWithText(wrapper);
                 }
             }
         });
 
-        const originalPath = sourceFile.getFilePath();
-        const newPath = originalPath.replace(/\.ts$/, ".annotated.ts");
         sourceFile.save();
-        console.log(`Saved annotated file: ${newPath}`);
     }
 
-
-    function getTargetStatement(node: import("ts-morph").Node) {
-        if (node.getKind() === SyntaxKind.ExpressionStatement) {
-            return node;
-        }
-
-        const parent = node.getParent();
-        if (!parent || parent.getKind() !== SyntaxKind.Block) return undefined;
-
-        const block = parent as import("ts-morph").Block;
-        const statements = block.getStatements();
-
-        // find first statement after comment/node
-        const idx = statements.findIndex(s => s.getStart() >= node.getStart());
-        if (idx >= 0) return statements[idx];
-
-        return undefined;
-    }
-    // Apply @raised: find JSDoc with @raised (after tree has roleContext), insert variable and use it in the call
+    console.log("[static] Processing @raised tags...");
     const jsDocWithRaised = findJsDocWithRaised(project);
-    console.log("\n--- JSDoc with @raised (ts-morph) ---");
-    for (const { node, roleName } of jsDocWithRaised) {
-        const sf = node.getSourceFile();
-        const line = node.getStartLineNumber();
-        console.log(`${path.basename(sf.getFilePath())}:${line} ${node.getKindName()} @raised ${roleName}`);
-    }
     const sorted = [...jsDocWithRaised].sort((a, b) => b.node.getStart() - a.node.getStart());
 
     for (const { node, roleName } of sorted) {
-        // Find the parent block
         let blockNode = node.getParent();
         while (blockNode && blockNode.getKind() !== SyntaxKind.Block) {
             blockNode = blockNode.getParent();
@@ -754,85 +624,119 @@ function collectCallSitesForFn(
 
         const block = blockNode.asKindOrThrow(SyntaxKind.Block);
         const statements = block.getStatements();
-
-        // Find the index of the `@raised` placeholder statement
         const idx = statements.findIndex(s => s.getStart() === node.getStart());
         if (idx < 0) continue;
 
         const varName = `roleContextRaised_${idx}`;
-
-        // Replace the placeholder with the variable declaration
         statements[idx].replaceWithText(`const ${varName}: ${roleName} = new ${roleName}();`);
 
-        const affectedStatements = block.getStatements().slice(idx + 1)
+        const affectedStatements = block.getStatements().slice(idx + 1);
         for (const stmt of affectedStatements) {
             stmt.forEachDescendant(desc => {
-                if (desc.getKind() !== SyntaxKind.CallExpression) return
-                const call = desc as CallExpression
-                const roleArgIdx = call.getArguments().findIndex(a => a.getText() === "roleContext")
-                if (roleArgIdx >= 0) call.getArguments()[roleArgIdx].replaceWithText(varName)
-            })
+                if (desc.getKind() !== SyntaxKind.CallExpression) return;
+                const call = desc as CallExpression;
+                const roleArgIdx = call.getArguments().findIndex(a => a.getText() === "roleContext");
+                if (roleArgIdx >= 0) call.getArguments()[roleArgIdx].replaceWithText(varName);
+            });
         }
     }
+
     project.save();
-    // const callIndex = buildCallIndex(project);
 
-    const entryPoints: string[] = []
-    const entryFiles: string[] = []
+    console.log("[static] Collecting diagnostics...");
+    const entryPoints: string[] = [];
+    const entryFiles: string[] = [];
+    const hardFails: { fnName: string; msg: string; file: string }[] = [];
+    const diagLines: string[] = [];
+
+    const log = (line: string) => { console.log(line); diagLines.push(line); };
+    const err = (line: string) => { console.error(line); diagLines.push(line); };
+
     for (const diag of project.getPreEmitDiagnostics()) {
-        const sf = diag.getSourceFile()
-        const start = diag.getStart()
-        if (!sf || start === undefined) continue
+        const sf = diag.getSourceFile();
+        const start = diag.getStart();
+        if (!sf || start === undefined) continue;
 
-        let node = sf.getDescendantAtPos(start)
-        if (!node) continue
+        let node = sf.getDescendantAtPos(start);
+        if (!node) continue;
 
-        let current = node.getParent()
-        let fnName: string | undefined
+        let current = node.getParent();
+        let fnName: string | undefined;
         while (current) {
-            const kind = current.getKind()
+            const kind = current.getKind();
             if (kind === SyntaxKind.FunctionDeclaration || kind === SyntaxKind.MethodDeclaration) {
-                const fn = current as FunctionDeclaration | MethodDeclaration
-                const name = fn.getName()
-                if (name) fnName = name
-                break
+                const fn = current as FunctionDeclaration | MethodDeclaration;
+                const name = fn.getName();
+                if (name) fnName = name;
+                break;
             }
-            current = current.getParent()
+            current = current.getParent();
         }
-        if (!fnName) continue
+        if (!fnName) continue;
 
-        const msg = ts.flattenDiagnosticMessageText(diag.compilerObject.messageText, "\n")
+        const msg = ts.flattenDiagnosticMessageText(diag.compilerObject.messageText, "\n");
+        const file = path.basename(sf.getFilePath());
 
-        // Handle type mismatch errors
-        const requiredTypeMatch = msg.match(/parameter of type '(\w+)'/)
+        const requiredTypeMatch = msg.match(/parameter of type '(\w+)'/);
+        const argCountMatch = msg.match(/Expected (\d+) arguments?, but got (\d+)/);
 
-        // Handle argument count mismatch errors
-        const argCountMatch = msg.match(/Expected (\d+) arguments?, but got (\d+)/)
-
-        if (!requiredTypeMatch && !argCountMatch) continue
+        if (!requiredTypeMatch && !argCountMatch) continue;
 
         if (requiredTypeMatch) {
-            const requiredType = requiredTypeMatch[1]
-            console.log(`\nError in '${fnName}': needs '${requiredType}' (${msg.split("\n")[0]})`)
-            const trace = reverseTraceUntilRole(project, fnName, requiredType)
-            console.log(`Trace: [${trace.join(" -> ")}]`)
+            const requiredType = requiredTypeMatch[1];
+            const trace = reverseTraceUntilRole(project, fnName, requiredType);
             if (trace[0]) {
-                entryPoints.push(trace[0])
-                entryFiles.push(path.basename(sf.getFilePath()))
-                console.log(`[entry point] '${trace[0]}' in '${path.basename(sf.getFilePath())}'`)
+                log(`[symex] '${fnName}' needs '${requiredType}' — trace: [${trace.join(" -> ")}] in '${file}'`);
+                entryPoints.push(trace[0]);
+                entryFiles.push(file);
+            } else {
+                err(`[hard fail] '${fnName}' needs '${requiredType}' but no entry point found — '${file}': ${msg.split("\n")[0]}`);
+                hardFails.push({ fnName, msg: msg.split("\n")[0], file });
             }
         } else if (argCountMatch) {
-            const [, expected, got] = argCountMatch
-            console.log(`\nError in '${fnName}': expected ${expected} args but got ${got} (${msg.split("\n")[0]})`)
-            const trace = reverseTrace(project, fnName)
-            console.log(`Trace: [${trace.join(" -> ")}]`)
+            const [, expected, got] = argCountMatch;
+            const trace = reverseTrace(project, fnName);
             if (trace[0]) {
-                entryPoints.push(trace[0])
-                entryFiles.push(path.basename(sf.getFilePath()))
-                console.log(`[entry point] '${trace[0]}' in '${path.basename(sf.getFilePath())}'`)
+                log(`[symex] '${fnName}' expected ${expected} args got ${got} — trace: [${trace.join(" -> ")}] in '${file}'`);
+                entryPoints.push(trace[0]);
+                entryFiles.push(file);
+            } else {
+                err(`[hard fail] '${fnName}' expected ${expected} args got ${got} but no entry point found — '${file}': ${msg.split("\n")[0]}`);
+                hardFails.push({ fnName, msg: msg.split("\n")[0], file });
             }
         }
     }
 
-    makeForSymex(jsverSymdir, classNames, entryPoints, entryFiles)
+    if (hardFails.length > 0) {
+        err(`\n[hard fail summary] ${hardFails.length} violation(s) with no reachable entry point:`);
+        for (const { fnName, msg, file } of hardFails) {
+            err(`  • ${file} :: ${fnName} — ${msg}`);
+        }
+    }
+
+    const seen = new Set<string>();
+    const dedupedPoints: string[] = [];
+    const dedupedFiles: string[] = [];
+    for (let i = 0; i < entryPoints.length; i++) {
+        const key = `${entryFiles[i]}::${entryPoints[i]}`;
+        if (!seen.has(key)) {
+            seen.add(key);
+            dedupedPoints.push(entryPoints[i]);
+            dedupedFiles.push(entryFiles[i]);
+        }
+    }
+
+    log(`\n[done] ${dedupedPoints.length} entry point(s) queued for symex (${entryPoints.length - dedupedPoints.length} duplicate(s) dropped), ${hardFails.length} hard fail(s):`);
+    for (let i = 0; i < dedupedPoints.length; i++) {
+        log(`  • [symex] ${dedupedFiles[i]} :: ${dedupedPoints[i]}`);
+    }
+    for (const { fnName, file } of hardFails) {
+        log(`  • [hard fail] ${file} :: ${fnName}`);
+    }
+
+    const outFile = path.join(targetDir, "diagnostics.log");
+    fs.writeFileSync(outFile, diagLines.join("\n") + "\n", "utf-8");
+    console.log(`[done] Diagnostics written to ${outFile}`);
+
+    makeForSymex(jsverSymdir, classNames, dedupedPoints, dedupedFiles);
 })();
