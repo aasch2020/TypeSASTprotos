@@ -18,10 +18,82 @@ const TypeSast = {
 const JsDoc = {
 	RequiresRole: "requiresRole",
 	BecomesRole: "becomesRole",
-	If: "if"
+	If: "ifReturns"
 };
 
 const RoleVar = "_TYPESAST_ROLE_CTX";
+
+function uniq(tc: ts.TypeChecker, node: Node, base: string) {
+	let i = 0;
+
+	while (true) {
+		const name = i === 0 ? base : `${base}_${i.toString(16)}`;
+		const symbols = tc.getSymbolsInScope(node, ts.SymbolFlags.Value | ts.SymbolFlags.Type | ts.SymbolFlags.Namespace);
+
+		if (!symbols.some(s => s.getName() === name)) {
+			return name;
+		}
+		i++;
+	}
+}
+
+type ValueExit =
+	| { kind: "return"; node: ts.ReturnStatement }
+	| { kind: "yield"; node: ts.YieldExpression }
+	| { kind: "expression-body"; node: Node }
+	| { kind: "implicit-end"; node: Node };
+
+function getAllValueExits(fn: ts.Node): ValueExit[] | void {
+	if (!Node.isFunctionLikeDeclaration(fn)) return;
+	const exits: ValueExit[] = [];
+
+	const body = (() => {
+		switch (fn.getKind()) {
+			case SyntaxKind.ArrowFunction:
+				return fn.asKind(SyntaxKind.ArrowFunction)!.getBody();
+			case SyntaxKind.FunctionDeclaration:
+				return fn.asKind(SyntaxKind.FunctionDeclaration)!.getBody();
+			case SyntaxKind.MethodDeclaration:
+				return fn.asKind(SyntaxKind.MethodDeclaration)!.getBody();
+			case SyntaxKind.GetAccessor:
+				return fn.asKind(SyntaxKind.GetAccessor)!.getBody();
+			case SyntaxKind.SetAccessor:
+				return fn.asKind(SyntaxKind.SetAccessor)!.getBody();
+			case SyntaxKind.Constructor:
+				return fn.asKind(SyntaxKind.Constructor)!.getBody();
+			case SyntaxKind.FunctionExpression:
+				return fn.asKind(SyntaxKind.FunctionExpression)!.getBody();
+			case SyntaxKind.ArrowFunction:
+				return fn.asKind(SyntaxKind.ArrowFunction)!.getBody();
+		}
+	})()!;
+	if (!body) return exits;
+
+	if (Node.isArrowFunction(fn) && !Node.isBlock(body)) {
+		exits.push({ kind: "expression-body", node: body });
+		return exits;
+	}
+
+	body.forEachDescendant((node, traversal) => {
+		if (node !== fn && Node.isFunctionLikeDeclaration(node)) {
+			traversal.skip();
+			return;
+		}
+
+		if (Node.isReturnStatement(node)) {
+			exits.push({ kind: "return", node });
+			return;
+		}
+
+		if (Node.isYieldExpression(node)) {
+			exits.push({ kind: "yield", node });
+			return;
+		}
+	});
+
+	exits.push({ kind: "implicit-end", node: body });
+	return exits;
+}
 
 export async function transform(root: string): Promise<Map<string, any>> {
 	const roleConfig = {
@@ -30,7 +102,7 @@ export async function transform(root: string): Promise<Map<string, any>> {
 			"user": { subsumes: ["unauth"] },
 			"unauth": { subsumes: [] }
 		},
-		defaultRole: "unsec"
+		defaultRole: "unauth"
 	};//await readRoleConfig(`${root}/roles.ds`);
 	const existingRoles = new Set(Object.keys(roleConfig.roles));
 
@@ -40,7 +112,7 @@ export async function transform(root: string): Promise<Map<string, any>> {
 	const tc = project.getTypeChecker();
 
 	const roleGraph = Object.fromEntries(Object.entries(roleConfig.roles).map(([role, { subsumes }]) => [role, subsumes]));
-	const rolesGenerated = `export type ${TypeSast.Graph} = {${roleGraph}};export type ${TypeSast.Role} = keyof ${TypeSast.Graph};declare const _TYSAST_BRAND: unique symbol;type _TO_TYSAST_BRAND<K> = { readonly [_TYSAST_BRAND]: K };export type ${TypeSast.RoleToken}<R extends ${TypeSast.Role}> = _TO_TYSAST_BRAND<R> & { readonly role: R };export function ${TypeSast.MakeRole}<R extends ${TypeSast.Role}>(r: R): ${TypeSast.RoleToken}<R> { return { role: r } as ${TypeSast.RoleToken}<R>; }type _TYSAST_REACHABLE_FROM<Target extends ${TypeSast.Role}, Visited extends ${TypeSast.Role} = never> = Target extends Visited ? never : Target | (${TypeSast.Graph}[Target] extends readonly (infer Ns)[] ? (Ns extends ${TypeSast.Role} ? _TYSAST_REACHABLE_FROM<Ns, Visited | Target> : never) : never);export type _TYSAST_CAN_ELEVATE<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}> = To extends _TYSAST_REACHABLE_FROM<From> ? true : false;export function ${TypeSast.RequireRole}<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}>(_current: ${TypeSast.RoleToken}<From>,target: _TYSAST_CAN_ELEVATE<From, To> extends true ? To : never) {return ${TypeSast.MakeRole}(target);};export const ${TypeSast.Default}: ${TypeSast.Role} = ${JSON.stringify(roleConfig.defaultRole)};`;
+	const rolesGenerated = `export type ${TypeSast.Graph} = ${JSON.stringify(roleGraph)};export type ${TypeSast.Role} = keyof ${TypeSast.Graph};declare const _TYSAST_BRAND: unique symbol;type _TO_TYSAST_BRAND<K> = { readonly [_TYSAST_BRAND]: K };export type ${TypeSast.RoleToken}<R extends ${TypeSast.Role}> = _TO_TYSAST_BRAND<R> & { readonly role: R };export function ${TypeSast.MakeRole}<R extends ${TypeSast.Role}>(r: R): ${TypeSast.RoleToken}<R> { return { role: r } as ${TypeSast.RoleToken}<R>; }type _TYSAST_REACHABLE_FROM<Target extends ${TypeSast.Role}, Visited extends ${TypeSast.Role} = never> = Target extends Visited ? never : Target | (${TypeSast.Graph}[Target] extends readonly (infer Ns)[] ? (Ns extends ${TypeSast.Role} ? _TYSAST_REACHABLE_FROM<Ns, Visited | Target> : never) : never);export type _TYSAST_CAN_ELEVATE<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}> = To extends _TYSAST_REACHABLE_FROM<From> ? true : false;export function ${TypeSast.RequireRole}<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}>(_current: ${TypeSast.RoleToken}<From>,target: _TYSAST_CAN_ELEVATE<From, To> extends true ? To : never) {return ${TypeSast.MakeRole}(target);};export const ${TypeSast.Default}: ${TypeSast.Role} = ${JSON.stringify(roleConfig.defaultRole)};`;
 
 	const rolesPath = join(root, "roles.generated.ts");
 	//await writeFile(rolesPath, rolesGenerated, "utf8");
@@ -57,288 +129,114 @@ export async function transform(root: string): Promise<Map<string, any>> {
 		ms.prepend(`import { ${TypeSast.RoleToken}, ${TypeSast.MakeRole}, ${TypeSast.RequireRole}, ${TypeSast.Default}, ${TypeSast.Role} } from "./roles.generated";\n`);
 	}
 
-	const transformed: Set<ts.Node> = new Set();
+	const transformed: Map<ts.Node, { becomes: string, ifReturns: string }> = new Map();
 
 	for (const [sourceFile, ms] of files) {
-		(function collect(node: Node) {
+		(function addRequiresRole(node: Node) {
 			if (Node.isFunctionLikeDeclaration(node)) {
+				node.removeReturnType();
+
 				let requiredRole = roleConfig.defaultRole;
+				let becomesRole;
+				let ifReturns;
 				for (const doc of node.getJsDocs()) {
 					for (const t of doc.getTags()) {
-						if (t.getTagName() === JsDoc.RequiresRole) {
-							requiredRole = t.getCommentText()!.split(/[^\w]/)[0];
+						switch (t.getTagName()) {
+							case JsDoc.RequiresRole:
+								requiredRole = t.getCommentText()!.split(/[^\w]/)[0];
+								break;
+							case JsDoc.BecomesRole:
+								becomesRole = t.getCommentText()!.split(/[^\w]/)[0];
+								break;
+							case JsDoc.If:
+								ifReturns = t.getCommentText();
+								break;
 						}
 					}
 				}
+
 				node.addParameter({
 					name: RoleVar,
 					type: `${TypeSast.RoleToken}<"${requiredRole}">`
 				});
-				transformed.add(node);
+				if (becomesRole) {
+					for (const { kind, node: retNode } of getAllValueExits(node)!) {
+						switch (kind) {
+							case "return": {
+								const oldRet = retNode.getText();
+								retNode.replaceWithText(`return [(()=>{${oldRet}})(), ${TypeSast.MakeRole}("${becomesRole}")] as const;`);
+								break;
+							}
+							case "implicit-end": {
+								const block = retNode.asKind(SyntaxKind.Block)!;
+								block.addStatements(`return [(()=>{})(), ${TypeSast.MakeRole}("${becomesRole}")] as const;`);
+								break;
+							}
+							case "expression-body": {
+								const oldRet = retNode.getText();
+								retNode.replaceWithText(`[(${oldRet}), ${TypeSast.MakeRole}("${becomesRole}")] as const`)
+								break;
+							}
+							case "yield":
+								// Don't support this case, generator functions are gross
+								throw "crap idiot";
+						}
+					}
+				}
+				transformed.set(node, {
+					becomes: becomesRole || "",
+					ifReturns: ifReturns || ""
+				});
+				return;
 			}
-			/*switch (node.getKind()) {
-				case SyntaxKind.FunctionDeclaration:
-				case SyntaxKind.MethodDeclaration: {
-					const fn = node.asKind(SyntaxKind.FunctionDeclaration) ?? node.asKind(SyntaxKind.MethodDeclaration)!;
-
-
-					transformed.add(fn);
-					const openParen = node.getChildrenOfKind(SyntaxKind.OpenParenToken)[0];
-					const syntaxList = node.getChildAtIndex(openParen.getChildIndex() + 1)?.asKind(SyntaxKind.SyntaxList)!;
-					const lastParam = syntaxList?.getLastChildByKind(SyntaxKind.Parameter);
-					ms.appendRight(lastParam?.getEnd() ?? openParen.getEnd(), `${lastParam ? ", " : ""}roleContext: ${TypeSast.RoleToken}<"${requiredRole}">`);
-					break;
-				}
-				case ts.SyntaxKind.Constructor: {
-					//console.log("Constructor:", node.getChildren().map(x => x.kind));
-					break;
-				}
-				case ts.SyntaxKind.GetAccessor: {
-					//console.log("GetAccessor:", node.getChildren().map(x => x.kind));
-					break;
-				}
-				case ts.SyntaxKind.SetAccessor: {
-					//console.log("SetAccessor:", node.getChildren().map(x => x.kind));
-					break;
-				}
-				case ts.SyntaxKind.ArrowFunction:
-				case ts.SyntaxKind.FunctionExpression: {
-					// todo
-				}
-				case ts.SyntaxKind.FunctionType:
-				case ts.SyntaxKind.ConstructorType:
-					break;
-				case ts.SyntaxKind.CallExpression: {
-					const functionName = node.getChildrenOfKind(SyntaxKind.Identifier)[0];
-					if (!functionName) break;
-					const sym = tc.getSymbolAtLocation(functionName);
-					if (!sym) break;
-					const dec = sym.getValueDeclaration();
-					if (!dec) break;
-					if (!transformed.has(dec)) break;
-					const openParen = node.getChildrenOfKind(SyntaxKind.OpenParenToken)[0];
-					const syntaxList = node.getChildAtIndex(openParen.getChildIndex() + 1)?.asKind(SyntaxKind.SyntaxList)!;
-					const lastParam = syntaxList?.getLastChildByKind(SyntaxKind.Parameter);
-					ms.appendRight(lastParam?.getEnd() ?? openParen.getEnd(), `${lastParam ? ", " : ""}roleContext: ${TypeSast.RoleToken}<"${requiredRole}">`);
-					//console.log("gamer:", node.getChildren().map(x => x.kind));
-				}
-			}*/
-			node.forEachChild(collect);
+			node.forEachChild(addRequiresRole);
 		})(sourceFile);
-		console.log(sourceFile.print());
+
+		// Add the role var to functions that require it
+		(function addRoleVarToCallSites(node: Node) {
+			if (Node.isCallExpression(node)) {
+				const identifier = node.getChildAtIndex(0);
+				const sym = tc.getSymbolAtLocation(identifier);
+				const dec = sym?.getValueDeclaration();
+				if (dec) {
+					if (transformed.has(dec)) {
+						if (tc.resolveName(RoleVar, node, ts.SymbolFlags.Value, false)) {
+							node.addArgument(RoleVar);
+						} else {
+							node.addArgument(TypeSast.Default);
+						}
+						const { becomes, ifReturns } = transformed.get(dec)!;
+						if (becomes) {
+							const nodeText = node.getText();
+							const actualReturn = uniq(tc, node, "ret");
+							const secType = uniq(tc, node, "secType");
+							node.replaceWithText(`(()=>{const [${actualReturn},${secType}] = (${nodeText});if(${ifReturns ? `${ifReturns} === ${actualReturn}` : "true"}){${RoleVar} = ${secType};}return ${actualReturn};})()`);
+						}
+						return;
+					}
+				}
+			}
+			node.forEachChild(addRoleVarToCallSites);
+		})(sourceFile);
+		console.log(rolesGenerated + sourceFile.print());
 	}
 	throw "";
 
-	for (const filePath of toTransform) {
+	const map = ms.generateMap({
+		file: basename(filePath),
+		source: basename(filePath),
+		includeContent: true,
+		hires: true
+	});
 
-		const localFnNodes: Array<{ node: ts.FunctionLikeDeclarationBase, requiredRole?: string, becomesRole?: string }> = [];
+	// write transformed file with sourceMappingURL
+	const mapFileName = basename(filePath) + ".map";
+	const transformedWithMapComment = transformed + `\n//# sourceMappingURL=${mapFileName}\n`;
+	await writeFile(filePath, transformedWithMapComment, "utf8");
+	const mapPath = join(dirname(filePath), mapFileName);
+	await writeFile(mapPath, map.toString(), "utf8");
 
-		function collectTransforms(node: ts.Node) {
-			if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node))) {
-				const jsTags = ts.getJSDocTags(node);
-				const reqTag = jsTags.find(t => t.tagName && t.tagName.getText() === "requiresRole");
-				const becomesTag = jsTags.find(t => t.tagName && t.tagName.getText() === "becomesRole");
-				const requiredRole = reqTag ? (reqTag.comment ? String(reqTag.comment).trim() : undefined) : undefined;
-				const becomesRole = becomesTag ? (becomesTag.comment ? String(becomesTag.comment).trim() : undefined) : undefined;
-
-				if (requiredRole && !existingRoles.has(requiredRole)) {
-					throw new Error(`Role "${requiredRole}" used in ${filePath} but not present in roleConfig`);
-				}
-				if (becomesRole && !existingRoles.has(becomesRole)) {
-					throw new Error(`Role "${becomesRole}" used in ${filePath} but not present in roleConfig`);
-				}
-
-				// Only process top-level named functions and class methods and named function expressions
-				const params = (node as any).parameters as ts.NodeArray<ts.ParameterDeclaration> | undefined;
-				const hasRoleParam = params && params.some(p => ts.isIdentifier(p.name) && p.name.text === "roleContext");
-				if (!hasRoleParam) {
-					// insert parameter text just before the close-paren
-					const closeParen = node.getChildren().find(ch => ch.kind === ts.SyntaxKind.CloseParenToken);
-					const insertionPos = closeParen ? closeParen.getStart() : node.getEnd();
-					const paramText = requiredRole
-						? `roleContext: ${TypeSast.RoleToken}<"${requiredRole}">`
-						: `roleContext: ${TypeSast.RoleToken}<${TypeSast.Role}> = ${TypeSast.MakeRole}(${TypeSast.Default})`;
-					// if there are any parameters already, prepend ", "
-					const hasParams = params && params.length > 0;
-					const insertion = (hasParams ? `, ${paramText}` : paramText);
-					ms.appendLeft(insertionPos, insertion);
-				}
-
-				if (becomesRole && (becomesRole.length > 0)) {
-					// insert return type before body and replace simple returns
-					const body = (node as any).body as ts.Block | undefined;
-					if (body) {
-						// place return type annotation right before body
-						ms.appendLeft(body.getStart(), `: ${TypeSast.RoleToken}<"${becomesRole}"> `);
-
-						// replace trivial return expressions inside the body
-						function replaceReturns(n: ts.Node) {
-							if (ts.isReturnStatement(n)) {
-								if (n.expression) {
-									const exprText = n.expression.getFullText(sf).trim();
-									if (exprText === "true" || exprText === "false" || exprText === "null" || exprText === "undefined") {
-										ms.overwrite(n.expression.getStart(), n.expression.getEnd(), `${TypeSast.MakeRole}("${becomesRole}")`);
-									}
-								} else {
-									// bare return -> replace whole return
-									ms.overwrite(n.getStart(), n.getEnd(), `return ${TypeSast.MakeRole}("${becomesRole}");`);
-								}
-							}
-							ts.forEachChild(n, replaceReturns);
-						}
-						replaceReturns(body);
-
-						// if no return found, append one before closing brace
-						if (!/return\b/.test(body.getFullText(sf))) {
-							ms.appendLeft(body.getEnd() - 1, `\n  return ${TypeSast.MakeRole}("${becomesRole}");\n`);
-						}
-					}
-				}
-
-				localFnNodes.push({ node: node as ts.FunctionLikeDeclarationBase, requiredRole, becomesRole });
-			}
-			ts.forEachChild(node, collectTransforms);
-		}
-		collectTransforms(sf);
-
-		// Helper: find single-line leading comments like "// @raised ROLE" associated with an expression statement
-		function getRaisedRoleForStatement(stmt: ts.Statement): string | undefined {
-			const leadingRanges = ts.getLeadingCommentRanges(src, stmt.getFullStart()) || [];
-			if (leadingRanges.length === 0) return undefined;
-			// consider last leading comment only (closest)
-			const last = leadingRanges[leadingRanges.length - 1];
-			const txt = src.slice(last.pos, last.end);
-			// normalize: remove comment markers
-			const cleaned = txt.replace(/^\/\//, "").replace(/^\/\*\s*/, "").replace(/\*\/$/, "").trim();
-			const m = cleaned.match(/^@raised\s+([A-Za-z0-9_]+)/);
-			if (m) return m[1];
-			return undefined;
-		}
-
-		// Second pass: call-site rewriting (conservative). For call expressions whose callee is an Identifier
-		// and matches a known declaration that has @requiresRole, append requireRole(roleContext, "X").
-		function visitCalls(node: ts.Node) {
-			if (ts.isCallExpression(node)) {
-				// Skip if arg already contains roleContext or requireRole
-				const argsText = node.arguments.map(a => a.getFullText(sf)).join("\n");
-				if (argsText.includes("roleContext") || argsText.includes("requireRole(")) {
-					return;
-				}
-				// callee as identifier
-				if (ts.isIdentifier(node.expression)) {
-					const name = node.expression.text;
-					const decls = declsByName.get(name) || [];
-					// pick a decl in same project with a @requiresRole tag
-					const useful = decls.find(d => {
-						if (!d) return false;
-						const tags = ts.getJSDocTags(d.node as any);
-						const req = tags.find(t => t.tagName && t.tagName.getText() === "requiresRole");
-						return !!req;
-					});
-					if (useful) {
-						const req = ts.getJSDocTags(useful.node as any).find(t => t.tagName && t.tagName.getText() === "requiresRole");
-						const requiredRole = req ? (req.comment ? String(req.comment).trim() : undefined) : undefined;
-						if (!requiredRole) return;
-						if (!existingRoles.has(requiredRole)) {
-							throw new Error(`Role "${requiredRole}" referenced in call-site but not present in roleConfig`);
-						}
-						// insert before closing ')'
-						const insertion = (node.arguments.length > 0 ? `, requireRole(roleContext, "${requiredRole}")` : `requireRole(roleContext, "${requiredRole}")`);
-						// node.getEnd() is position after ')', so subtract 1 to insert before ')'
-						ms.appendLeft(node.getEnd() - 1, insertion);
-					}
-				}
-
-				// handle property access callee case with ClassName.method simple pattern: obj.method()
-				// attempt to match by method name only: if there exists any decl with method name and @requiresRole, apply a best-effort injection.
-				if (ts.isPropertyAccessExpression(node.expression)) {
-					const methodName = node.expression.name.text;
-					// search decls by method short name (e.g., ClassName.method registered as ClassName.method)
-					// first try any decl with .methodName key
-					for (const [key, decls] of declsByName.entries()) {
-						if (key.endsWith("." + methodName)) {
-							const useful = decls.find(d => {
-								const tags = ts.getJSDocTags(d.node as any);
-								return tags.some(t => t.tagName && t.tagName.getText() === "requiresRole");
-							});
-							if (useful) {
-								const req = ts.getJSDocTags(useful.node as any).find(t => t.tagName && t.tagName.getText() === "requiresRole");
-								const requiredRole = req ? (req.comment ? String(req.comment).trim() : undefined) : undefined;
-								if (!requiredRole) continue;
-								if (!existingRoles.has(requiredRole)) throw new Error(`Role "${requiredRole}" referenced in call-site but not present in roleConfig`);
-								if (!argsText.includes("roleContext") && !argsText.includes("requireRole(")) {
-									const insertion = (node.arguments.length > 0 ? `, requireRole(roleContext, "${requiredRole}")` : `requireRole(roleContext, "${requiredRole}")`);
-									ms.appendLeft(node.getEnd() - 1, insertion);
-								}
-								break;
-							}
-						}
-					}
-				}
-			}
-			ts.forEachChild(node, visitCalls);
-		}
-		visitCalls(sf);
-
-		// Third pass: implement // @raised ROLE handling. Look for ExpressionStatements that are CallExpressions
-		// and have a single-line leading comment matching @raised ROLE. Insert a const and replace the requireRole argument.
-		function visitStatements(node: ts.Node) {
-			const isExprStmt = ts.isExpressionStatement(node);
-			const isRetStmt = ts.isReturnStatement(node);
-			if (isExprStmt || isRetStmt) {
-				const expr = isExprStmt
-					? (node as ts.ExpressionStatement).expression
-					: (node as ts.ReturnStatement).expression;
-				if (expr && ts.isCallExpression(expr)) {
-					const raised = getRaisedRoleForStatement(node as ts.Statement);
-					if (raised) {
-						if (!existingRoles.has(raised)) throw new Error(`Role "${raised}" used in @raised comment in ${filePath} but not present in roleConfig`);
-						// insert const declaration before this statement
-						const declText = `const roleContextRaised: ${TypeSast.RoleToken}<"${raised}"> = ${TypeSast.MakeRole}("${raised}");\n`;
-						ms.appendLeft(node.getStart(), declText);
-						// alter the call: find the argument that is a call to requireRole and replace it
-						const args = expr.arguments;
-						let replaced = false;
-						for (let i = 0; i < args.length; i++) {
-							const arg = args[i];
-							// Check if the argument is a call to requireRole
-							if (ts.isCallExpression(arg) && ts.isIdentifier(arg.expression) && arg.expression.text === 'requireRole') {
-								// replace this argument with roleContextRaised
-								ms.overwrite(arg.getStart(), arg.getEnd(), 'roleContextRaised');
-								replaced = true;
-								break;
-							}
-						}
-						// If no requireRole call found, fall back to replacing the last argument (the injected roleContext)
-						if (!replaced && args.length > 0) {
-							ms.overwrite(args[args.length - 1].getStart(), args[args.length - 1].getEnd(), 'roleContextRaised');
-						}
-					}
-				}
-			}
-			ts.forEachChild(node, visitStatements);
-		}
-		visitStatements(sf);
-
-		// At this point all edits are in MagicString. Emit file and source map.
-		const transformed = ms.toString();
-		const map = ms.generateMap({
-			file: basename(filePath),
-			source: basename(filePath),
-			includeContent: true,
-			hires: true
-		});
-
-		// write transformed file with sourceMappingURL
-		const mapFileName = basename(filePath) + ".map";
-		const transformedWithMapComment = transformed + `\n//# sourceMappingURL=${mapFileName}\n`;
-		await writeFile(filePath, transformedWithMapComment, "utf8");
-		const mapPath = join(dirname(filePath), mapFileName);
-		await writeFile(mapPath, map.toString(), "utf8");
-
-		// store raw map JSON
-		resultMaps.set(filePath, JSON.parse(map.toString()));
-	}
+	resultMaps.set(filePath, JSON.parse(map.toString()));
 
 	return resultMaps;
 }

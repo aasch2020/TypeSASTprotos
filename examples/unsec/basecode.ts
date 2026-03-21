@@ -1,11 +1,11 @@
 /**
  * @roles 0 < user < admin
  */
-type Role = "admin" | "user" | "0";
+type RALE = "admin" | "user" | "0";
 
 type Token = {
   userId: number;
-  role: Role;
+  role: RALE;
 };
 // type Account = {
 //   /** @requiresRole user */
@@ -13,7 +13,6 @@ type Token = {
 //   /** @requiresRole admin */
 //   promoteToAdmin: () => void;
 // }
-
 
 class UserAccount {
   /** @requiresRole user */
@@ -44,7 +43,7 @@ function auth(req: string): boolean {
 }
 
 /** @requiresRole user @becomesRole admin */
-function requireAdminRole(role: Role): boolean {
+function requireAdminRole(role: RALE): boolean {
   if (role === "admin") {
     return true;
 
@@ -52,7 +51,7 @@ function requireAdminRole(role: Role): boolean {
     return false;
   }
 }
-function adminWrite(req: string, ctx: Role): void {
+function adminWrite(req: string, ctx: RALE): void {
   if (!requireAdminRole(ctx)) {
     throw new Error("Unauthorized");
   } else {

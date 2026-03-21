@@ -1,4 +1,5 @@
-/** @requiresRole unauth */
+
+/** @requiresRole unauth @becomesRole admin */
 export function handleRequest(token: string, body: string) {
     console.log(`Received request with token="${token}" and body="${body}"`);
 
@@ -7,12 +8,18 @@ export function handleRequest(token: string, body: string) {
         /**  @raised user */
         void 0;
         handleUserRequest(token, body);
-    } else if (token.startsWith("admin-")) {
+    } else if (validateAdmin(token)) {
         return handleAdminRequest(token, body);
     } else {
         console.log("Unauthenticated token, rejecting request");
         return null;
     }
+}
+/**
+ * @becomesRole admin @ifReturns true
+ */
+function validateAdmin(token: string) {
+    return token.startsWith("admin-");
 }
 
 /** @requiresRole user */
