@@ -3,13 +3,14 @@ import { cp } from "fs/promises";
 import * as path from "path";
 import fs from "fs";
 import { execSync } from "child_process";
-import { reverseTrace, reverseTraceUntilRole } from "./src/bt"
+import { reverseTrace, reverseTraceUnprotected } from "./src/bt"
 
 export function makeSymexDriver(
     project: Project,
     funcName: string,
     tsFile: string,
-    outFile: string
+    outFile: string,
+    initialRole?: string
 ) {
     const sourceFile = project.addSourceFileAtPath(tsFile);
 
@@ -24,6 +25,10 @@ export function makeSymexDriver(
     lines.push(`var { state } = require("./state");`);
     lines.push(`var { ${funcName} } = require("${jsModule}");`);
     lines.push(`var out;`);
+
+    if (initialRole) {
+        lines.push(`state.currentRole = "${initialRole}";`);
+    }
 
     function buildSymex(type: import("ts-morph").Type, path: string): string {
         if (type.isString()) return `S$.symbol("${path}", "")`;
@@ -104,7 +109,7 @@ function findJsDocWithRaised(project: Project) {
     return out;
 }
 
-function makeForSymex(targetDir: string, roles: string[], entryPoints: string[], entryFiles: string[]) {
+function makeForSymex(targetDir: string, roles: string[], entryPoints: string[], entryFiles: string[], entryRoles: string[]) {
     console.log("[symex] Building state machine...");
     const project = new Project({
         compilerOptions: {
@@ -305,7 +310,7 @@ function makeForSymex(targetDir: string, roles: string[], entryPoints: string[],
 
     console.log("[symex] Generating drivers and compiling...");
     for (let i = 0; i < entryPoints.length; i++) {
-        makeSymexDriver(project, entryPoints[i], path.join(targetDir, entryFiles[i]), path.join(targetDir, `driver_${i}.js`));
+        makeSymexDriver(project, entryPoints[i], path.join(targetDir, entryFiles[i]), path.join(targetDir, `driver_${i}.js`), entryRoles[i]);
     }
     try {
         execSync(`tsc --project ${targetDir}/tsconfig.json`, { stdio: "inherit" });
@@ -654,11 +659,25 @@ function collectCallSitesForFn(
     console.log("[static] Collecting diagnostics...");
     const entryPoints: string[] = [];
     const entryFiles: string[] = [];
+    const entryRoles: string[] = [];
     const hardFails: { fnName: string; msg: string; file: string }[] = [];
     const diagLines: string[] = [];
 
     const log = (line: string) => { console.log(line); diagLines.push(line); };
     const err = (line: string) => { console.error(line); diagLines.push(line); };
+
+    function getRoleForFn(name: string): string {
+        for (const sf of project.getSourceFiles()) {
+            for (const fn of sf.getFunctions()) {
+                if (fn.getName() === name) {
+                    const rp = fn.getParameters().find(p => p.getName() === "roleContext");
+                    const t = rp?.getType().getText().split(".").pop();
+                    if (t) return t.charAt(0).toLowerCase() + t.slice(1);
+                }
+            }
+        }
+        return classNames[0];
+    }
 
     for (const diag of project.getPreEmitDiagnostics()) {
         const sf = diag.getSourceFile();
@@ -693,42 +712,68 @@ function collectCallSitesForFn(
 
         if (requiredTypeMatch) {
             const requiredType = requiredTypeMatch[1];
-            const trace = reverseTraceUntilRole(project, fnName, requiredType);
-            if (trace[0]) {
-                log(`[symex] '${fnName}' needs '${requiredType}' — trace: [${trace.join(" -> ")}] in '${file}'`);
-                entryPoints.push(trace[0]);
-                entryFiles.push(file);
+            const { roots, discarded } = reverseTraceUnprotected(project, fnName, requiredType);
+            if (roots.length > 0) {
+                for (const entry of roots) {
+                    log(`[symex] '${fnName}' needs '${requiredType}' - unprotected root: '${entry}' in '${file}'`);
+                    entryPoints.push(entry);
+                    entryFiles.push(file);
+                    entryRoles.push(getRoleForFn(entry));
+                }
+            } else if (discarded > 0) {
+                log(`[false positive] '${fnName}' needs '${requiredType}' but all ${discarded} path(s) are protected - '${file}'`);
             } else {
-                err(`[hard fail] '${fnName}' needs '${requiredType}' but no entry point found — '${file}': ${msg.split("\n")[0]}`);
+                err(`[hard fail] '${fnName}' needs '${requiredType}' but no entry point found - '${file}': ${msg.split("\n")[0]}`);
                 hardFails.push({ fnName, msg: msg.split("\n")[0], file });
             }
         } else if (argCountMatch) {
             const [, expected, got] = argCountMatch;
             const trace = reverseTrace(project, fnName);
             if (trace[0]) {
-                log(`[symex] '${fnName}' expected ${expected} args got ${got} — trace: [${trace.join(" -> ")}] in '${file}'`);
+                log(`[symex] '${fnName}' expected ${expected} args got ${got} - trace: [${trace.join(" -> ")}] in '${file}'`);
                 entryPoints.push(trace[0]);
                 entryFiles.push(file);
+                entryRoles.push(getRoleForFn(trace[0]));
             } else {
-                err(`[hard fail] '${fnName}' expected ${expected} args got ${got} but no entry point found — '${file}': ${msg.split("\n")[0]}`);
+                err(`[hard fail] '${fnName}' expected ${expected} args got ${got} but no entry point found - '${file}': ${msg.split("\n")[0]}`);
                 hardFails.push({ fnName, msg: msg.split("\n")[0], file });
             }
         } else if (callbackMismatchMatch) {
             const innerRoleMatch = msg.match(/Type '(\w+)' is not assignable to type '(\w+)'/);
             const requiredType = innerRoleMatch ? innerRoleMatch[2] : undefined;
 
-            const trace = requiredType
-                ? reverseTraceUntilRole(project, fnName, requiredType)
-                : reverseTrace(project, fnName);
-
-            if (trace[0]) {
-                log(`[symex] '${fnName}' callback mismatch${requiredType ? ` (needs '${requiredType}')` : ''} — trace: [${trace.join(" -> ")}] in '${file}'`);
-                entryPoints.push(trace[0]);
-                entryFiles.push(file);
+            if (requiredType) {
+                const { roots, discarded } = reverseTraceUnprotected(project, fnName, requiredType);
+                if (roots.length > 0) {
+                    for (const entry of roots) {
+                        log(`[symex] '${fnName}' callback mismatch (needs '${requiredType}') - unprotected root: '${entry}' in '${file}'`);
+                        entryPoints.push(entry);
+                        entryFiles.push(file);
+                        entryRoles.push(getRoleForFn(entry));
+                    }
+                } else if (discarded > 0) {
+                    log(`[false positive] '${fnName}' callback mismatch but all ${discarded} path(s) are protected - '${file}'`);
+                } else {
+                    log(`[symex] '${fnName}' callback mismatch, no unprotected root found - using '${fnName}' as entry in '${file}'`);
+                    entryPoints.push(fnName);
+                    entryFiles.push(file);
+                    entryRoles.push(getRoleForFn(fnName));
+                }
             } else {
-                log(`[symex] '${fnName}' callback mismatch, no trace found — using '${fnName}' as entry in '${file}'`);
-                entryPoints.push(fnName);
-                entryFiles.push(file);
+                const trace = reverseTrace(project, fnName);
+                if (trace.length > 0) {
+                    for (const entry of trace) {
+                        log(`[symex] '${fnName}' callback mismatch - unprotected root: '${entry}' in '${file}'`);
+                        entryPoints.push(entry);
+                        entryFiles.push(file);
+                        entryRoles.push(getRoleForFn(entry));
+                    }
+                } else {
+                    log(`[symex] '${fnName}' callback mismatch, no trace found - using '${fnName}' as entry in '${file}'`);
+                    entryPoints.push(fnName);
+                    entryFiles.push(file);
+                    entryRoles.push(getRoleForFn(fnName));
+                }
             }
         }
     }
@@ -736,19 +781,21 @@ function collectCallSitesForFn(
     if (hardFails.length > 0) {
         err(`\n[hard fail summary] ${hardFails.length} violation(s) with no reachable entry point:`);
         for (const { fnName, msg, file } of hardFails) {
-            err(`  • ${file} :: ${fnName} — ${msg}`);
+            err(`  • ${file} :: ${fnName} - ${msg}`);
         }
     }
 
     const seen = new Set<string>();
     const dedupedPoints: string[] = [];
     const dedupedFiles: string[] = [];
+    const dedupedRoles: string[] = [];
     for (let i = 0; i < entryPoints.length; i++) {
         const key = `${entryFiles[i]}::${entryPoints[i]}`;
         if (!seen.has(key)) {
             seen.add(key);
             dedupedPoints.push(entryPoints[i]);
             dedupedFiles.push(entryFiles[i]);
+            dedupedRoles.push(entryRoles[i]);
         }
     }
 
@@ -764,5 +811,5 @@ function collectCallSitesForFn(
     fs.writeFileSync(outFile, diagLines.join("\n") + "\n", "utf-8");
     console.log(`[done] Diagnostics written to ${outFile}`);
 
-    makeForSymex(jsverSymdir, classNames, dedupedPoints, dedupedFiles);
+    makeForSymex(jsverSymdir, classNames, dedupedPoints, dedupedFiles, dedupedRoles);
 })();
