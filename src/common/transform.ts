@@ -12,7 +12,10 @@ const TypeSast = {
 	MakeRole: "_TYSAST_MAKE_ROLE",
 	RequireRole: "_TYSAST_REQUIRE_ROLE",
 	Default: "_TYSAST_DEFAULT_ROLE",
-	RoleToken: "_TYSAST_ROLE_TOKEN"
+	RoleToken: "_TYSAST_ROLE_TOKEN",
+	Satisfies: "_TYSAST_SATISFIES",
+	Reachable: "_TYSAST_REACHABLE_FROM",
+	CanElevate: "_TYSAST_CAN_ELEVATE" // poorly named, more like can lower
 };
 
 const JsDoc = {
@@ -112,7 +115,7 @@ export async function transform(root: string): Promise<Map<string, any>> {
 	const tc = project.getTypeChecker();
 
 	const roleGraph = Object.fromEntries(Object.entries(roleConfig.roles).map(([role, { subsumes }]) => [role, subsumes]));
-	const rolesGenerated = `export type ${TypeSast.Graph} = ${JSON.stringify(roleGraph)};export type ${TypeSast.Role} = keyof ${TypeSast.Graph};declare const _TYSAST_BRAND: unique symbol;type _TO_TYSAST_BRAND<K> = { readonly [_TYSAST_BRAND]: K };export type ${TypeSast.RoleToken}<R extends ${TypeSast.Role}> = _TO_TYSAST_BRAND<R> & { readonly role: R };export function ${TypeSast.MakeRole}<R extends ${TypeSast.Role}>(r: R): ${TypeSast.RoleToken}<R> { return { role: r } as ${TypeSast.RoleToken}<R>; }type _TYSAST_REACHABLE_FROM<Target extends ${TypeSast.Role}, Visited extends ${TypeSast.Role} = never> = Target extends Visited ? never : Target | (${TypeSast.Graph}[Target] extends readonly (infer Ns)[] ? (Ns extends ${TypeSast.Role} ? _TYSAST_REACHABLE_FROM<Ns, Visited | Target> : never) : never);export type _TYSAST_CAN_ELEVATE<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}> = To extends _TYSAST_REACHABLE_FROM<From> ? true : false;export function ${TypeSast.RequireRole}<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}>(_current: ${TypeSast.RoleToken}<From>,target: _TYSAST_CAN_ELEVATE<From, To> extends true ? To : never) {return ${TypeSast.MakeRole}(target);};export const ${TypeSast.Default}: ${TypeSast.Role} = ${JSON.stringify(roleConfig.defaultRole)};`;
+	const rolesGenerated = `export type ${TypeSast.Graph} = ${JSON.stringify(roleGraph)};export type ${TypeSast.Role} = keyof ${TypeSast.Graph};declare const _TYSAST_BRAND: unique symbol;type _TO_TYSAST_BRAND<K> = { readonly [_TYSAST_BRAND]: K };export type ${TypeSast.RoleToken}<R extends ${TypeSast.Role}> = _TO_TYSAST_BRAND<R> & { readonly role: R };export function ${TypeSast.MakeRole}<R extends ${TypeSast.Role}>(r: R): ${TypeSast.RoleToken}<R> { return { role: r } as ${TypeSast.RoleToken}<R>; }type ${TypeSast.Reachable}<Target extends ${TypeSast.Role}, Visited extends ${TypeSast.Role} = never> = Target extends Visited ? never : Target | (${TypeSast.Graph}[Target] extends readonly (infer Ns)[] ? (Ns extends ${TypeSast.Role} ? ${TypeSast.Reachable}<Ns, Visited | Target> : never) : never);export type ${TypeSast.CanElevate}<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}> = To extends ${TypeSast.Reachable}<From> ? true : false;export function ${TypeSast.RequireRole}<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}>(_current: ${TypeSast.RoleToken}<From>,target: ${TypeSast.CanElevate}<From, To> extends true ? To : never) {return ${TypeSast.MakeRole}(target);};type ${TypeSast.Satisfies}<Have extends ${TypeSast.Role}, Need extends ${TypeSast.Role}> = ${TypeSast.CanElevate}<Have, Need> extends true ? ${TypeSast.RoleToken}<Have> : never;export const ${TypeSast.Default}: ${TypeSast.Role} = ${JSON.stringify(roleConfig.defaultRole)};`;
 
 	const rolesPath = join(root, "roles.generated.ts");
 	//await writeFile(rolesPath, rolesGenerated, "utf8");
@@ -135,6 +138,11 @@ export async function transform(root: string): Promise<Map<string, any>> {
 		(function addRequiresRole(node: Node) {
 			if (Node.isFunctionLikeDeclaration(node)) {
 				node.removeReturnType();
+				const generic = uniq(tc, node, "_TS_HAVE");
+				node.addTypeParameter({
+					name: generic,
+					constraint: TypeSast.Role
+				});
 
 				let requiredRole = roleConfig.defaultRole;
 				let becomesRole;
@@ -157,7 +165,7 @@ export async function transform(root: string): Promise<Map<string, any>> {
 
 				node.addParameter({
 					name: RoleVar,
-					type: `${TypeSast.RoleToken}<"${requiredRole}">`
+					type: `${TypeSast.Satisfies}<${generic},"${requiredRole}">`
 				});
 				if (becomesRole) {
 					for (const { kind, node: retNode } of getAllValueExits(node)!) {
