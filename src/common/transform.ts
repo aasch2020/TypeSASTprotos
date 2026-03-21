@@ -1,130 +1,150 @@
-import * as ts from "typescript";
+//import * as ts from "typescript";
+import * as ts from "ts-morph";
+import { Project, Node, SyntaxKind } from "ts-morph";
 import MagicString from "magic-string";
 import { readFile, writeFile } from "fs/promises";
 import { join, dirname, basename } from "path";
-import { readRoleConfig } from "./config";
+//import { readRoleConfig } from "./config";
 
-// GPT SLOP
-/**
- * transform modifies .ts files in-place under root (staging directory), emitting sourcemaps.
- * Returns a map from transformed file path -> raw source map object.
- *
- * Caller must create the TypeScript Program after this transform (use the project's tsconfig).
- */
+const TypeSast = {
+	Role: "_TYSAST_ROLE",
+	Graph: "_TYSAST_GRAPH",
+	MakeRole: "_TYSAST_MAKE_ROLE",
+	RequireRole: "_TYSAST_REQUIRE_ROLE",
+	Default: "_TYSAST_DEFAULT_ROLE",
+	RoleToken: "_TYSAST_ROLE_TOKEN"
+};
+
+const JsDoc = {
+	RequiresRole: "requiresRole",
+	BecomesRole: "becomesRole",
+	If: "if"
+};
+
+const RoleVar = "_TYPESAST_ROLE_CTX";
+
 export async function transform(root: string): Promise<Map<string, any>> {
-	const roleConfig = await readRoleConfig(`${root}/roles.ds`); // must exist in your environment
-	const knownRoles = new Set(Object.keys(roleConfig.roles || {}));
+	const roleConfig = {
+		roles: {
+			"admin": { subsumes: ["user", "unauth"] },
+			"user": { subsumes: ["unauth"] },
+			"unauth": { subsumes: [] }
+		},
+		defaultRole: "unsec"
+	};//await readRoleConfig(`${root}/roles.ds`);
+	const existingRoles = new Set(Object.keys(roleConfig.roles));
 
-	// read tsconfig to get file list (do not create a Program here)
-	const parsed = ts.getParsedCommandLineOfConfigFile(join(root, "tsconfig.json"), {}, {
-		...ts.sys,
-		onUnRecoverableConfigFileDiagnostic(diag) {
-			console.error("tsconfig parse error:", ts.flattenDiagnosticMessageText(diag.messageText, "\n"));
-		}
+	const project = new Project({
+		tsConfigFilePath: join(root, "tsconfig.json")
 	});
-	if (!parsed) throw new Error("Failed to parse tsconfig.json");
+	const tc = project.getTypeChecker();
 
-	// Build roles.generated.ts content and write it. Overwrite if exists.
-	const graphEntries = Object.keys(roleConfig.roles || {}).map(role => {
-		const arr = (roleConfig.roles[role].subsumes || []).map(a => `"${a}"`).join(", ");
-		return `  "${role}": [${arr}]`;
-	}).join(",\n");
-	const rolesGenerated = `
-export type _TYSAST_GRAPH = {
-  ${graphEntries}
-};
+	const roleGraph = Object.fromEntries(Object.entries(roleConfig.roles).map(([role, { subsumes }]) => [role, subsumes]));
+	const rolesGenerated = `export type ${TypeSast.Graph} = {${roleGraph}};export type ${TypeSast.Role} = keyof ${TypeSast.Graph};declare const _TYSAST_BRAND: unique symbol;type _TO_TYSAST_BRAND<K> = { readonly [_TYSAST_BRAND]: K };export type ${TypeSast.RoleToken}<R extends ${TypeSast.Role}> = _TO_TYSAST_BRAND<R> & { readonly role: R };export function ${TypeSast.MakeRole}<R extends ${TypeSast.Role}>(r: R): ${TypeSast.RoleToken}<R> { return { role: r } as ${TypeSast.RoleToken}<R>; }type _TYSAST_REACHABLE_FROM<Target extends ${TypeSast.Role}, Visited extends ${TypeSast.Role} = never> = Target extends Visited ? never : Target | (${TypeSast.Graph}[Target] extends readonly (infer Ns)[] ? (Ns extends ${TypeSast.Role} ? _TYSAST_REACHABLE_FROM<Ns, Visited | Target> : never) : never);export type _TYSAST_CAN_ELEVATE<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}> = To extends _TYSAST_REACHABLE_FROM<From> ? true : false;export function ${TypeSast.RequireRole}<From extends ${TypeSast.Role}, To extends ${TypeSast.Role}>(_current: ${TypeSast.RoleToken}<From>,target: _TYSAST_CAN_ELEVATE<From, To> extends true ? To : never) {return ${TypeSast.MakeRole}(target);};export const ${TypeSast.Default}: ${TypeSast.Role} = ${JSON.stringify(roleConfig.defaultRole)};`;
 
-export type _TYSAST_ROLE = keyof _TYSAST_GRAPH;
-
-declare const _TYSAST_BRAND: unique symbol;
-type _TO_TYSAST_BRAND<K> = { readonly [_TYSAST_BRAND]: K };
-export type _TYSAST_ROLE_TOKEN<R extends _TYSAST_ROLE> = _TO_TYSAST_BRAND<R> & { readonly role: R };
-export function _TYSAST_MAKE_ROLE<R extends _TYSAST_ROLE>(r: R): _TYSAST_ROLE_TOKEN<R> { return { role: r } as _TYSAST_ROLE_TOKEN<R>; }
-
-type _TYSAST_REACHABLE_FROM<Target extends _TYSAST_ROLE, Visited extends _TYSAST_ROLE = never> =
-  Target extends Visited ? never :
-  Target | (_TYSAST_GRAPH[Target] extends readonly (infer Ns)[] 
-        ? (Ns extends _TYSAST_ROLE ? _TYSAST_REACHABLE_FROM<Ns, Visited | Target> : never) 
-        : never);
-
-export type _TYSAST_CAN_ELEVATE<From extends _TYSAST_ROLE, To extends _TYSAST_ROLE> = To extends _TYSAST_REACHABLE_FROM<From> ? true : false;
-
-export function requireRole<From extends _TYSAST_ROLE, To extends _TYSAST_ROLE>(
-  _current: _TYSAST_ROLE_TOKEN<From>,
-  target: _TYSAST_CAN_ELEVATE<From, To> extends true ? To : never
-) {
-  return _TYSAST_MAKE_ROLE(target);
-};
-export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.defaultRole)};
-`;
-	console.log("USING:", rolesGenerated);
 	const rolesPath = join(root, "roles.generated.ts");
-	await writeFile(rolesPath, rolesGenerated, "utf8");
-
-	// files to transform: use parsed.fileNames but filter out .d.ts and roles.generated.ts
-	const fileNames = (parsed.fileNames || []).filter(p => p.endsWith(".ts") && !p.endsWith(".d.ts") && basename(p) !== "roles.generated.ts");
+	//await writeFile(rolesPath, rolesGenerated, "utf8");
 
 	const resultMaps = new Map<string, any>();
 
-	// Build a simple name->declaration index for function and method declarations to enable conservative call-site rewrites.
-	// We'll scan all files first to collect declarations and their requiredRole metadata.
-	type DeclInfo = { filePath: string, node: ts.Node, requiredRole?: string };
-	const declsByName = new Map<string, DeclInfo[]>();
+	const files = await Promise.all(project.getSourceFiles().map(async file => {
+		const src = await readFile(file.getFilePath(), "utf8");
+		const ms = new MagicString(src);
+		return [file, ms] as const;
+	}));
 
-	for (const filePath of fileNames) {
-		const src = await readFile(filePath, "utf8");
-		const sf = ts.createSourceFile(filePath, src, ts.ScriptTarget.ESNext, true);
-		function collect(node: ts.Node) {
-			if (ts.isFunctionDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
-				const jsTags = ts.getJSDocTags(node);
-				const req = jsTags.find(t => t.tagName && t.tagName.getText() === "requiresRole");
-				const requiredRole = req ? (req.comment ? String(req.comment).trim() : undefined) : undefined;
-				declsByName.set(node.name.text, (declsByName.get(node.name.text) || []).concat([{ filePath, node, requiredRole }]));
-			}
-			if (ts.isClassDeclaration(node) && node.members) {
-				const className = node.name ? node.name.text : undefined;
-				for (const mem of node.members) {
-					if ((ts.isMethodDeclaration(mem) || ts.isMethodSignature(mem)) && mem.name && ts.isIdentifier(mem.name) && className) {
-						const methodKey = `${className}.${mem.name.text}`;
-						const jsTags = ts.getJSDocTags(mem);
-						const req = jsTags.find(t => t.tagName && t.tagName.getText() === "requiresRole");
-						const requiredRole = req ? (req.comment ? String(req.comment).trim() : undefined) : undefined;
-						declsByName.set(methodKey, (declsByName.get(methodKey) || []).concat([{ filePath, node: mem, requiredRole }]));
-					}
-				}
-			}
-			ts.forEachChild(node, collect);
-		}
-		collect(sf);
+	for (const [_, ms] of files) {
+		ms.prepend(`import { ${TypeSast.RoleToken}, ${TypeSast.MakeRole}, ${TypeSast.RequireRole}, ${TypeSast.Default}, ${TypeSast.Role} } from "./roles.generated";\n`);
 	}
 
-	// Transform each file with MagicString
-	for (const filePath of fileNames) {
-		const src = await readFile(filePath, "utf8");
-		const ms = new MagicString(src);
-		const sf = ts.createSourceFile(filePath, src, ts.ScriptTarget.ESNext, true);
+	const transformed: Set<ts.Node> = new Set();
 
-		// ensure roles import exists; if not present add import at top
-		if (!/from\s+['"]\.\/roles\.generated['"]/.test(src) && !/from\s+['"]roles\.generated['"]/.test(src)) {
-			ms.prepend(`import { _TYSAST_ROLE_TOKEN, _TYSAST_MAKE_ROLE, requireRole, _TYSAST_DEFAULT_ROLE, _TYSAST_ROLE } from "./roles.generated";\n`);
-		}
+	for (const [sourceFile, ms] of files) {
+		(function collect(node: Node) {
+			if (Node.isFunctionLikeDeclaration(node)) {
+				let requiredRole = roleConfig.defaultRole;
+				for (const doc of node.getJsDocs()) {
+					for (const t of doc.getTags()) {
+						if (t.getTagName() === JsDoc.RequiresRole) {
+							requiredRole = t.getCommentText()!.split(/[^\w]/)[0];
+						}
+					}
+				}
+				node.addParameter({
+					name: RoleVar,
+					type: `${TypeSast.RoleToken}<"${requiredRole}">`
+				});
+				transformed.add(node);
+			}
+			/*switch (node.getKind()) {
+				case SyntaxKind.FunctionDeclaration:
+				case SyntaxKind.MethodDeclaration: {
+					const fn = node.asKind(SyntaxKind.FunctionDeclaration) ?? node.asKind(SyntaxKind.MethodDeclaration)!;
 
-		// Collect function/method declarations in this file for local changes
+
+					transformed.add(fn);
+					const openParen = node.getChildrenOfKind(SyntaxKind.OpenParenToken)[0];
+					const syntaxList = node.getChildAtIndex(openParen.getChildIndex() + 1)?.asKind(SyntaxKind.SyntaxList)!;
+					const lastParam = syntaxList?.getLastChildByKind(SyntaxKind.Parameter);
+					ms.appendRight(lastParam?.getEnd() ?? openParen.getEnd(), `${lastParam ? ", " : ""}roleContext: ${TypeSast.RoleToken}<"${requiredRole}">`);
+					break;
+				}
+				case ts.SyntaxKind.Constructor: {
+					//console.log("Constructor:", node.getChildren().map(x => x.kind));
+					break;
+				}
+				case ts.SyntaxKind.GetAccessor: {
+					//console.log("GetAccessor:", node.getChildren().map(x => x.kind));
+					break;
+				}
+				case ts.SyntaxKind.SetAccessor: {
+					//console.log("SetAccessor:", node.getChildren().map(x => x.kind));
+					break;
+				}
+				case ts.SyntaxKind.ArrowFunction:
+				case ts.SyntaxKind.FunctionExpression: {
+					// todo
+				}
+				case ts.SyntaxKind.FunctionType:
+				case ts.SyntaxKind.ConstructorType:
+					break;
+				case ts.SyntaxKind.CallExpression: {
+					const functionName = node.getChildrenOfKind(SyntaxKind.Identifier)[0];
+					if (!functionName) break;
+					const sym = tc.getSymbolAtLocation(functionName);
+					if (!sym) break;
+					const dec = sym.getValueDeclaration();
+					if (!dec) break;
+					if (!transformed.has(dec)) break;
+					const openParen = node.getChildrenOfKind(SyntaxKind.OpenParenToken)[0];
+					const syntaxList = node.getChildAtIndex(openParen.getChildIndex() + 1)?.asKind(SyntaxKind.SyntaxList)!;
+					const lastParam = syntaxList?.getLastChildByKind(SyntaxKind.Parameter);
+					ms.appendRight(lastParam?.getEnd() ?? openParen.getEnd(), `${lastParam ? ", " : ""}roleContext: ${TypeSast.RoleToken}<"${requiredRole}">`);
+					//console.log("gamer:", node.getChildren().map(x => x.kind));
+				}
+			}*/
+			node.forEachChild(collect);
+		})(sourceFile);
+		console.log(sourceFile.print());
+	}
+	throw "";
+
+	for (const filePath of toTransform) {
+
 		const localFnNodes: Array<{ node: ts.FunctionLikeDeclarationBase, requiredRole?: string, becomesRole?: string }> = [];
 
 		function collectTransforms(node: ts.Node) {
 			if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node))) {
-				// skip anonymous arrow functions not assigned to a name (we cannot reliably transform those)
 				const jsTags = ts.getJSDocTags(node);
 				const reqTag = jsTags.find(t => t.tagName && t.tagName.getText() === "requiresRole");
 				const becomesTag = jsTags.find(t => t.tagName && t.tagName.getText() === "becomesRole");
 				const requiredRole = reqTag ? (reqTag.comment ? String(reqTag.comment).trim() : undefined) : undefined;
 				const becomesRole = becomesTag ? (becomesTag.comment ? String(becomesTag.comment).trim() : undefined) : undefined;
 
-				if (requiredRole && !knownRoles.has(requiredRole)) {
+				if (requiredRole && !existingRoles.has(requiredRole)) {
 					throw new Error(`Role "${requiredRole}" used in ${filePath} but not present in roleConfig`);
 				}
-				if (becomesRole && !knownRoles.has(becomesRole)) {
+				if (becomesRole && !existingRoles.has(becomesRole)) {
 					throw new Error(`Role "${becomesRole}" used in ${filePath} but not present in roleConfig`);
 				}
 
@@ -136,8 +156,8 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 					const closeParen = node.getChildren().find(ch => ch.kind === ts.SyntaxKind.CloseParenToken);
 					const insertionPos = closeParen ? closeParen.getStart() : node.getEnd();
 					const paramText = requiredRole
-						? `roleContext: _TYSAST_ROLE_TOKEN<"${requiredRole}">`
-						: `roleContext: _TYSAST_ROLE_TOKEN<_TYSAST_ROLE> = _TYSAST_MAKE_ROLE(_TYSAST_DEFAULT_ROLE as _TYSAST_ROLE)`;
+						? `roleContext: ${TypeSast.RoleToken}<"${requiredRole}">`
+						: `roleContext: ${TypeSast.RoleToken}<${TypeSast.Role}> = ${TypeSast.MakeRole}(${TypeSast.Default})`;
 					// if there are any parameters already, prepend ", "
 					const hasParams = params && params.length > 0;
 					const insertion = (hasParams ? `, ${paramText}` : paramText);
@@ -149,7 +169,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 					const body = (node as any).body as ts.Block | undefined;
 					if (body) {
 						// place return type annotation right before body
-						ms.appendLeft(body.getStart(), `: _TYSAST_ROLE_TOKEN<"${becomesRole}"> `);
+						ms.appendLeft(body.getStart(), `: ${TypeSast.RoleToken}<"${becomesRole}"> `);
 
 						// replace trivial return expressions inside the body
 						function replaceReturns(n: ts.Node) {
@@ -157,11 +177,11 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 								if (n.expression) {
 									const exprText = n.expression.getFullText(sf).trim();
 									if (exprText === "true" || exprText === "false" || exprText === "null" || exprText === "undefined") {
-										ms.overwrite(n.expression.getStart(), n.expression.getEnd(), `_TYSAST_MAKE_ROLE("${becomesRole}")`);
+										ms.overwrite(n.expression.getStart(), n.expression.getEnd(), `${TypeSast.MakeRole}("${becomesRole}")`);
 									}
 								} else {
 									// bare return -> replace whole return
-									ms.overwrite(n.getStart(), n.getEnd(), `return _TYSAST_MAKE_ROLE("${becomesRole}");`);
+									ms.overwrite(n.getStart(), n.getEnd(), `return ${TypeSast.MakeRole}("${becomesRole}");`);
 								}
 							}
 							ts.forEachChild(n, replaceReturns);
@@ -170,7 +190,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 
 						// if no return found, append one before closing brace
 						if (!/return\b/.test(body.getFullText(sf))) {
-							ms.appendLeft(body.getEnd() - 1, `\n  return _TYSAST_MAKE_ROLE("${becomesRole}");\n`);
+							ms.appendLeft(body.getEnd() - 1, `\n  return ${TypeSast.MakeRole}("${becomesRole}");\n`);
 						}
 					}
 				}
@@ -219,7 +239,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 						const req = ts.getJSDocTags(useful.node as any).find(t => t.tagName && t.tagName.getText() === "requiresRole");
 						const requiredRole = req ? (req.comment ? String(req.comment).trim() : undefined) : undefined;
 						if (!requiredRole) return;
-						if (!knownRoles.has(requiredRole)) {
+						if (!existingRoles.has(requiredRole)) {
 							throw new Error(`Role "${requiredRole}" referenced in call-site but not present in roleConfig`);
 						}
 						// insert before closing ')'
@@ -245,7 +265,7 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 								const req = ts.getJSDocTags(useful.node as any).find(t => t.tagName && t.tagName.getText() === "requiresRole");
 								const requiredRole = req ? (req.comment ? String(req.comment).trim() : undefined) : undefined;
 								if (!requiredRole) continue;
-								if (!knownRoles.has(requiredRole)) throw new Error(`Role "${requiredRole}" referenced in call-site but not present in roleConfig`);
+								if (!existingRoles.has(requiredRole)) throw new Error(`Role "${requiredRole}" referenced in call-site but not present in roleConfig`);
 								if (!argsText.includes("roleContext") && !argsText.includes("requireRole(")) {
 									const insertion = (node.arguments.length > 0 ? `, requireRole(roleContext, "${requiredRole}")` : `requireRole(roleContext, "${requiredRole}")`);
 									ms.appendLeft(node.getEnd() - 1, insertion);
@@ -272,9 +292,9 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 				if (expr && ts.isCallExpression(expr)) {
 					const raised = getRaisedRoleForStatement(node as ts.Statement);
 					if (raised) {
-						if (!knownRoles.has(raised)) throw new Error(`Role "${raised}" used in @raised comment in ${filePath} but not present in roleConfig`);
+						if (!existingRoles.has(raised)) throw new Error(`Role "${raised}" used in @raised comment in ${filePath} but not present in roleConfig`);
 						// insert const declaration before this statement
-						const declText = `const roleContextRaised: _TYSAST_ROLE_TOKEN<"${raised}"> = _TYSAST_MAKE_ROLE("${raised}");\n`;
+						const declText = `const roleContextRaised: ${TypeSast.RoleToken}<"${raised}"> = ${TypeSast.MakeRole}("${raised}");\n`;
 						ms.appendLeft(node.getStart(), declText);
 						// alter the call: find the argument that is a call to requireRole and replace it
 						const args = expr.arguments;
@@ -322,3 +342,5 @@ export const _TYSAST_DEFAULT_ROLE: _TYSAST_ROLE = ${JSON.stringify(roleConfig.de
 
 	return resultMaps;
 }
+
+transform("F:\\Desktop\\TypeSASTprotos\\examples\\unsec");
