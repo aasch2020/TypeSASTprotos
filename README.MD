@@ -4,9 +4,7 @@ Prototype **type-based static analysis** for **access control** in TypeScript. A
 
 Research context: *Type-Based Static Analysis for Access Control in TypeScript* (Alex Asch, Eric Huang, Nick Petrone, UC San Diego).
 
-## Why TypeSAST
 
-Many SAST tools apply rules globally, are noisy (high false-positive rate), or are expensive (heavy whole-program analysis). TypeSAST ties policy to the code that matters: developers declare roles and requirements next to implementations. The fast static pass favors **sound-ish over-approximation** (false positives) where control flow is hard; symbolic execution can refine those sites.
 
 ## JSDoc language (static pass)
 
@@ -17,7 +15,13 @@ Many SAST tools apply rules globally, are noisy (high false-positive rate), or a
 | `@becomesRole R` | Function elevates the effective role for its scope (propagated at transformed callsites). |
 | `@raised R` | Block-level elevation; subsequent calls in the block use the raised context. |
 
-**Caveats:** First-class functions limit completeness (aliases across blocks, callbacks through `any`-typed receivers, etc.). The paper discusses these cases and the “high–low–high” control-flow pattern.
+**Caveats:** First-class functions limit completeness (aliases across blocks, callbacks through `any`-typed receivers, etc.). The paper discusses these cases and the “high–low–high” control-flow pattern. Also: `any` typed parameters cannot be checked
+
+## Single hierarchy V1
+
+The entire working V1 driver exists under `v1driver.ts` it expects one target directory, and will create two copies, one for type based analysis, and one for the copied verion for symbolic driver generation.
+
+**ExpoSE integration** to run with ExpoSE, run ExpoSE at the numbered generated driver files. NOTE: this is experimental, and may not be performant or stable.
 
 ## Despot configuration (v2)
 
@@ -80,14 +84,7 @@ The pipeline expects `roles.ts` with a `roles()` function whose JSDoc contains `
 
 ## VS Code extension
 
-The package declares commands **Run typechecking** (`typesast.check`) and **Run SymEx and Annotate code** (`typesast.symex`). The extension applies `transform()` and maps diagnostics back using source maps. It is **experimental** (v2-oriented; source mapping with `magic-string` + ts-morph remains finicky—see paper §VII).
+The package declares commands **Run typechecking** (`typesast.check`) and **Run SymEx and Annotate code** (`typesast.symex`). The extension applies `transform()` and maps diagnostics back using source maps. It is a work in progress
 
 To hack on it: open the repo in VS Code, build with `npm run dev`, then launch the extension host from **Run and Debug** (see `.vscode/launch.json`).
 
-## License
-
-`ISC` (see `package.json`).
-
-## Citation
-
-If you use this work academically, cite the TypeSAST paper and this repository: [https://github.com/aasch2020/TypeSASTprotos](https://github.com/aasch2020/TypeSASTprotos).
